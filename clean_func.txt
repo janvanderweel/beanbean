@@ -1,0 +1,96 @@
+void performMeasurement() {
+  if (currentState != STATE_MEASURE) return;
+  
+  lcd.setTextSize(1);
+  // Existing measurement code from your initial example
+  float v;
+  int n = 0;
+  led = !led;
+
+  digitalWrite(LED_BUILTIN, led);
+
+  if (withLed)
+  {
+    sensor.takeMeasurementsWithBulb();
+  }
+  else
+  {
+    sensor.takeMeasurements(); // This is a hard wait while all 18 channels are measured
+  }
+
+  Serial.print("$L,");
+  Serial.print(v = sensor.getCalibratedA());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedB());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedC());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedD());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedE());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedF());
+  showValue(n++, v);
+  Serial.print(",");
+
+  Serial.print(v = sensor.getCalibratedG());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedH());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedI());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedJ());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedK());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedL());
+  showValue(n++, v);
+  Serial.print(",");
+
+  Serial.print(v = sensor.getCalibratedR());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedS());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedT());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedU());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedV());
+  showValue(n++, v);
+  Serial.print(",");
+  Serial.print(v = sensor.getCalibratedW());
+  showValue(n++, v);
+  showValues();
+  Serial.println();
+  Serial.print("$T,");
+  int oneSensorTemp = sensor.getTemperature(); // Returns the temperature of master IC
+  Serial.print(oneSensorTemp);
+  float threeSensorTemp = sensor.getTemperatureAverage(); // Returns the average temperature of all three ICs
+  Serial.print(",");
+  Serial.print(threeSensorTemp, 2);
+  Serial.println();
+  {
+    char s[20];
+    sprintf(s, "%4.1f°C", threeSensorTemp);
+    lcd.drawString(s, 250, 0);
+  }
+
+  // Optionally, add a way to return to the menu from the measurement screen
+  if (digitalRead(WIO_KEY_C) == LOW) {
+    currentState = STATE_MENU;
+    displayMenu();
+}}
