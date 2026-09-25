@@ -3,6 +3,8 @@
 A small embedded program that reads the **18-channel Spectrum Triad
 [AS7265X](https://www.spektral.com/product/spectrum-triad-4-2-as7265x-ultraviolet-visible-near-infrared-spectrophotometer/)** and renders per-wavelength light bars on a TFT screen.
 
+This is alpha code, might run at all!
+
 Originally written for a **Seeed Studio WIO Terminal** (running the
 [Arduino](https://www.arduino.cc/) / [IDE](https://www.arduino.cc/en/software) sketch `src/beanbeam/beanbeam.ino`), with an optional later port to the Grove Pi. It is an early **alpha (V0.1)** — the logic (menus, calibration, display) is the focus, not a production-grade instrument.
 
@@ -141,7 +143,7 @@ Dual-attribution.
 - This project is released under the **MIT License** — see
   [`LICENSE.md`](LICENSE.md).
 - The **SparkFun AS7265X** sensor code is `MIT`; the original Spectral Triad code
-  is **[Reinhardt Behm's](https://github.com/SinKang)** — please respect its own
+  is **Reinhardt Behm's** — please respect its own
   license/attribution.
 
 ## Contributing
