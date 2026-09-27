@@ -1,14 +1,15 @@
 /*
-
  * Coffee spectrometer on the Seeed WIO Terminal
- * 
+ *
  * Read the 18 channels of spectral light over I2C using the Spectral Triad
- * By: Jan van der Weel using Reinhardt Behm's code as a starting pint
+ * By: Jan van der Weel using Reinhardt Behm's code as a starting point
  * SparkFun Electronics
  * Date: October 25th, 2024
  * License: MIT. See license file for more information but you can
  */
 
+#include <Arduino.h>
+#include <Wire.h>
 #define LGFX_AUTODETECT
 #include "SparkFun_AS7265X.h" // Click here to get the library: http://librarymanager/All#SparkFun_AS7265X
 #include "button.h"
@@ -157,9 +158,23 @@ static void initMap()
 }
 
 float values[18];
+bool measurementPending = false;
 
-void showValues()
+void enableBulbs()
 {
+  sensor.enableBulb(AS7265x_LED_WHITE);
+  sensor.enableBulb(AS7265x_LED_IR);
+  sensor.enableBulb(AS7265x_LED_UV);
+}
+
+void disableBulbs()
+{
+  sensor.disableBulb(AS7265x_LED_WHITE);
+  sensor.disableBulb(AS7265x_LED_IR);
+  sensor.disableBulb(AS7265x_LED_UV);
+}
+
+void showValues(){
   float maxv = 0;
   for (int n = 0; n < 18; ++n)
   {
@@ -236,65 +251,73 @@ void displayAboutScreen() {
   lcd.drawString("Beanbeam V0.1 alpha", 20, 80);
 }
 
-// Function to perform measurement
+// Function to perform measurement without blocking the main loop.
 void performMeasurement() {
   if (currentState != STATE_MEASURE) return;
-  
-  lcd.setTextSize(1);
-  
-  // Visual indicator that measurement is active
-  lcd.setTextColor(TFT_RED);
-  lcd.drawString("LIVE", 260, 0);
-  lcd.setTextColor(TFT_WHITE);
-  
-  led = !led;
-  digitalWrite(LED_BUILTIN, led);
-  
-  if (withLed) {
-    sensor.takeMeasurementsWithBulb();
-  } else {
-    sensor.takeMeasurements(); // This is a hard wait while all 18 channels are measured
+
+  if (!measurementPending) {
+    lcd.setTextSize(1);
+    lcd.setTextColor(TFT_RED);
+    lcd.drawString("LIVE", 260, 0);
+    lcd.setTextColor(TFT_WHITE);
+
+    led = !led;
+    digitalWrite(LED_BUILTIN, led);
+
+    if (withLed) {
+      enableBulbs();
+    }
+
+    sensor.setMeasurementMode(AS7265X_MEASUREMENT_MODE_6CHAN_ONE_SHOT);
+    measurementPending = true;
+    return;
   }
-  
-  // Mapping of calibrated value getters to allow loop-based reading
-  float (*getters[])() = {
-    sensor.getCalibratedA, sensor.getCalibratedB, sensor.getCalibratedC,
-    sensor.getCalibratedD, sensor.getCalibratedE, sensor.getCalibratedF,
-    sensor.getCalibratedG, sensor.getCalibratedH, sensor.getCalibratedI,
-    sensor.getCalibratedJ, sensor.getCalibratedK, sensor.getCalibratedL,
-    sensor.getCalibratedR, sensor.getCalibratedS, sensor.getCalibratedT,
-    sensor.getCalibratedU, sensor.getCalibratedV, sensor.getCalibratedW
+
+  if (!sensor.dataAvailable()) {
+    return;
+  }
+
+  if (withLed) {
+    disableBulbs();
+  }
+
+  float (AS7265X::*getters[])() = {
+    &AS7265X::getCalibratedA, &AS7265X::getCalibratedB, &AS7265X::getCalibratedC,
+    &AS7265X::getCalibratedD, &AS7265X::getCalibratedE, &AS7265X::getCalibratedF,
+    &AS7265X::getCalibratedG, &AS7265X::getCalibratedH, &AS7265X::getCalibratedI,
+    &AS7265X::getCalibratedJ, &AS7265X::getCalibratedK, &AS7265X::getCalibratedL,
+    &AS7265X::getCalibratedR, &AS7265X::getCalibratedS, &AS7265X::getCalibratedT,
+    &AS7265X::getCalibratedU, &AS7265X::getCalibratedV, &AS7265X::getCalibratedW
   };
 
   Serial.print("$L,");
   for (int n = 0; n < 18; n++) {
-    float v = getters[n]();
-    v *= calibrationFactors[n]; // Apply calibration factor
+    float v = (sensor.*getters[n])();
+    v *= calibrationFactors[n];
     showValue(n, v);
     Serial.print(v);
     if (n < 17) Serial.print(",");
   }
-  
+
   showValues();
   Serial.println();
-  
+
   Serial.print("$T,");
-  int oneSensorTemp = sensor.getTemperature(); // Returns the temperature of master IC
+  int oneSensorTemp = sensor.getTemperature();
   Serial.print(oneSensorTemp);
-  float threeSensorTemp = sensor.getTemperatureAverage(); // Returns the average temperature of all three ICs
+  float threeSensorTemp = sensor.getTemperatureAverage();
   Serial.print(",");
   Serial.print(threeSensorTemp, 2);
   Serial.println();
-  
+
   {
     char s[20];
     sprintf(s, "%4.1f°C", threeSensorTemp);
     lcd.drawString(s, 250, 0);
   }
-  
-  // Return to menu handled in loop()
-}
 
+  measurementPending = false;
+}
 
 // Function to perform calibration
 void performCalibration() {
@@ -314,25 +337,23 @@ void runCalibrationSequence() {
   int samples = 5;
   
   for (int s = 0; s < samples; s++) {
-    // Progress bar
     int barW = (s + 1) * (200 / samples);
     lcd.fillRect(20, 110, barW, 10, TFT_GREEN);
-    
     lcd.drawString("Sample " + String(s+1) + "/" + String(samples), 20, 80);
     if (withLed) sensor.takeMeasurementsWithBulb();
     else sensor.takeMeasurements();
     
-    float (*getters[])() = {
-      sensor.getCalibratedA, sensor.getCalibratedB, sensor.getCalibratedC,
-      sensor.getCalibratedD, sensor.getCalibratedE, sensor.getCalibratedF,
-      sensor.getCalibratedG, sensor.getCalibratedH, sensor.getCalibratedI,
-      sensor.getCalibratedJ, sensor.getCalibratedK, sensor.getCalibratedL,
-      sensor.getCalibratedR, sensor.getCalibratedS, sensor.getCalibratedT,
-      sensor.getCalibratedU, sensor.getCalibratedV, sensor.getCalibratedW
+    float (AS7265X::*getters[])() = {
+      &AS7265X::getCalibratedA, &AS7265X::getCalibratedB, &AS7265X::getCalibratedC,
+      &AS7265X::getCalibratedD, &AS7265X::getCalibratedE, &AS7265X::getCalibratedF,
+      &AS7265X::getCalibratedG, &AS7265X::getCalibratedH, &AS7265X::getCalibratedI,
+      &AS7265X::getCalibratedJ, &AS7265X::getCalibratedK, &AS7265X::getCalibratedL,
+      &AS7265X::getCalibratedR, &AS7265X::getCalibratedS, &AS7265X::getCalibratedT,
+      &AS7265X::getCalibratedU, &AS7265X::getCalibratedV, &AS7265X::getCalibratedW
     };
     
     for (int i = 0; i < 18; i++) {
-      sums[i] += getters[i]();
+      sums[i] += (sensor.*getters[i])();
     }
     delay(200);
   }
@@ -350,58 +371,64 @@ void runCalibrationSequence() {
 }
 
 void loop() {
-  // Check button presses using digitalRead
-  if (bA()) {
-    Serial.println("5 Way Up Pressed");
-    menuSelection = (menuSelection + 2) % 3; // Move up in the menu
-    displayMenu();
-    Serial.println("A Key pressed");
-    delay(200); // Debouncing delay
-  }
-  else if (bB()) {
-    Serial.println("5 Way Down Pressed");
-    menuSelection = (menuSelection + 1) % 3; // Move down in the menu
-    displayMenu();
-    Serial.println("B Key pressed");
-    delay(200); // Debouncing delay
-  }
-  else if (bC()) {
-    Serial.println("5 Way Press Pressed");
-    
-    // Select the current menu item
-    switch (menuSelection) {
-      case 0: // Measure
-        currentState = STATE_MEASURE;
-        lcd.fillScreen(TFT_BLACK);
-        break;
-      case 1: // Calibrate
-        currentState = STATE_CALIBRATE_READY;
-        lcd.fillScreen(TFT_BLACK);
-        displayCalibrateScreen();
-        break;
-      case 2: // About
-        currentState = STATE_ABOUT;
-        lcd.fillScreen(TFT_BLACK);
-        displayAboutScreen();
-        break;
-    }
-    delay(200); // Debouncing delay
-  }
+  const bool keyAPressed = bA();
+  const bool keyBPressed = bB();
+  const bool keyCPressed = bC();
+  const bool centerPressed = S5();
+  const bool confirmPressed = keyCPressed || centerPressed;
 
-  // Handle state-specific actions
-  if (currentState == STATE_MEASURE) {
-    performMeasurement();
-  } else if (currentState == STATE_CALIBRATE_READY) {
-    if (bC()) {
+  if (currentState == STATE_MENU) {
+    if (keyAPressed) {
+      Serial.println("A Key pressed");
+      menuSelection = (menuSelection + 2) % 3;
+      displayMenu();
+    }
+    else if (keyBPressed) {
+      Serial.println("B Key pressed");
+      menuSelection = (menuSelection + 1) % 3;
+      displayMenu();
+    }
+    else if (confirmPressed) {
+      Serial.println("Confirm pressed");
+      switch (menuSelection) {
+        case 0:
+          currentState = STATE_MEASURE;
+          measurementPending = false;
+          lcd.fillScreen(TFT_BLACK);
+          break;
+        case 1:
+          currentState = STATE_CALIBRATE_READY;
+          lcd.fillScreen(TFT_BLACK);
+          displayCalibrateScreen();
+          break;
+        case 2:
+          currentState = STATE_ABOUT;
+          lcd.fillScreen(TFT_BLACK);
+          displayAboutScreen();
+          break;
+      }
+    }
+  }
+  else if (currentState == STATE_MEASURE) {
+    if (confirmPressed) {
+      currentState = STATE_MENU;
+      measurementPending = false;
+      displayMenu();
+    } else {
+      performMeasurement();
+    }
+  }
+  else if (currentState == STATE_CALIBRATE_READY) {
+    if (confirmPressed) {
       runCalibrationSequence();
       currentState = STATE_MENU;
       displayMenu();
     }
   }
-  
-  // Global return to menu: Press Button C in any sub-state
-  if (currentState != STATE_MENU && bC()) {
-    currentState = STATE_MENU;
-    displayMenu();
+  else if (currentState == STATE_ABOUT) {
+    if (confirmPressed) {
+      currentState = STATE_MENU;
+      displayMenu();
+    }
   }
 }

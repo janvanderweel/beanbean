@@ -4,39 +4,40 @@
 void Button::poll()
 {
     const unsigned long delta = 10;
-    if (! m_isInit)
+
+    if (!m_isInit)
     {
+        pinMode(m_b, m_activeLow ? INPUT_PULLUP : INPUT);
+        const bool raw = digitalRead(m_b);
+        const bool pressed = (m_activeLow ? (raw == LOW) : (raw == HIGH));
         m_isInit = true;
-        pinMode(m_b, INPUT_PULLUP);
-        m_last = digitalRead(m_b);
-        m_state = m_last;
-        m_lastReported  = m_last;
+        m_last = pressed;
+        m_state = pressed;
+        m_lastReported = pressed;
         time = millis();
+        return;
     }
-    int s = digitalRead(m_b) == LOW;
-//    digitalWrite(LED_BUILTIN, s);
-    if (s != m_last)
+
+    const bool raw = digitalRead(m_b);
+    const bool pressed = (m_activeLow ? (raw == LOW) : (raw == HIGH));
+
+    if (pressed != m_last)
     {
-      m_last = s;
-      time = millis();
-//      Debug.print(DBG_VERBOSE, " Button:poll %d, %lu", m_last, time);
+        m_last = pressed;
+        time = millis();
+        return;
     }
-    else if (m_state != m_last)
+
+    if ((m_state != m_last) && ((millis() - time) > delta))
     {
-       unsigned long t = millis() - time;
-       if (t > delta)
-       {
-          m_state = m_last;
-//          Debug.print(DBG_VERBOSE, " Button:pollX %d, %lu", m_last, t);
-       }
+        m_state = m_last;
     }
 }
 
-bool Button::operator()() 
+bool Button::operator()()
 {
-    poll(); 
-    bool rc = m_state && !  m_lastReported;
-//     Debug.print(DBG_VERBOSE, " Button:() S:%d, R:%d, >:%d\n", m_state, m_lastReported, rc);
-    m_lastReported  = m_state;
-    return rc;
+    poll();
+    const bool edge = m_state && !m_lastReported;
+    m_lastReported = m_state;
+    return edge;
 }
