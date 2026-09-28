@@ -1,206 +1,365 @@
-# design_calibration.md — Two-plate (Low/High) reference calibration
+# design_calibration.md — Two-plate (Low/High) reference calibration — **V1 "Tonino-lite"**
+
+## 0. Goal (kept deliberately simple)
+
+Give Beanbeam a Tonino-style roast scale: **two reference plates define a
+straight line, then each sample maps onto that line as one number.** Nothing
+more for V1. The deeper 18-channel colour science (XYZ/sRGB, per-gain
+acceptance bands, channel auto-selection) is explicitly deferred — see
+§8 *Deferred / out of scope* and Appendix A for the full reasoning.
+
+This replaces the earlier, larger draft. The full "spectrophotometer-grade"
+version is preserved as **Appendix A** so nothing is lost, but it is NOT the
+V1 plan.
+
+---
 
 ## 1. What this is
 
-Beanbeam reads a 18-channel spectrometer. This doc adds an **optional two-plate
-calibration** so the meter maps a sample to colour/temperature instead of just
-printing raw per-wavelength bars. It adapts **Toneone's two-reference-plate
-scheme** (two coloured calibration disks) onto the AS7265X.
+Tonino calibrates a coffee-colour meter with **two coloured disks** (a darker
+"low" reference and a brighter "high" reference). It measures a single scalar
+per disk (Tonino: red/blue ratio), fits a 2-point line, and every later reading
+is placed on that line as one roast number.
 
-### Toneone vs AS7265X — don't conflate them
+Beanbeam does the same, adapted to the AS7265X:
 
-Toneone's scheme is built around the **TCS3200** colour sensor:
-it measures only **red** and **blue** channels, and colour = `R/B` ratio. The
-two disks (brown = "low", red = "high") are named in the library constants and
-define the two points of a calibration line.
+- The scalar is a **channel ratio** `red_channel / blue_channel` (two chosen
+  channels out of the 18), not a raw 2-diode R/B.
+- Two plates → two ratios → a Stage-1 line `v = cal0*ratio + cal1`, then a
+  fixed Stage-2 polynomial maps `v` → the Tonino roast number (§4).
+- After calibration, a sample reading takes **3 samples, averages them**,
+  computes the ratio, and reports `y` (the roast number) plus the roast label.
 
-The **AS7265X** is not a 2-channel colour sensor — it is an 18-channel
-spectrophotometer (410 → 940 nm). So the same *idea* ("two known reflectance
-disks → define a scale") applies, but the math must be expressed against the 18
-channels instead of just R/B. See §4.
+That is the whole feature. Keep it that small.
 
-## 2. Reference plates (what you have)
+---
 
-Two physical disks, used as calibration references:
+## 2. Reference plates
 
-| Plate | Common name | Role in fit | Target R/B ratio |
+Two physical disks used as calibration references:
+
+| Plate | Common name | Role | Notes |
 | :--- | :--- | :--- | :--- |
-| **Brown** | "Low" reference | anchors the low point | `~1.5` |
-| **Red**   | "High" reference  | anchors the high point | `~3.7` |
+| Brown | "Low" reference  | anchors the low point of the line  | darker / more matte |
+| Red   | "High" reference | anchors the high point of the line | brighter / stronger red |
 
-Target ratios are fixed constants (tuned on Toneone). The disks are assumed to
-be reasonably stable; `brown ≈ low` and `red ≈ high` are the *target* R/B values
-the fit tries to reproduce, and from those two points we derive the calibration
-coefficients.
+The two disks must produce **clearly separated ratios** so the calibration line
+is not near-vertical. That separation is the only property we actually depend
+on in V1. The specific target ratio values are hardware-dependent and are
+**captured during calibration**, not hardcoded (see §5).
 
-> `brown` is the darker/more-matte disk; `red` is the brighter/stronger-red disk.
-> The red disk gives the higher red-to-blue ratio (≈ 3.7), the brown disk the
-> lower one (≈ 1.5). The two colours must produce clearly separated R/B values so
-> the calibration line isn't near-vertical.
+---
 
-## 3. The flow (state machine)
-
-Calibration requires the operator to place each plate in front of the sensor:
+## 3. Flow (state machine) — three steps, all Button C
 
 ```
-            Button C (after step)          Button C
-  ┌───────────────────┐   place disk +   ┌───────────────────┐   lift & replace
-  │ STATE_CALIBRATE_READY │ ───────────► │   STATE_PLATE_MEASURE │ ────────────────►
-  │   (waiting for disk)  │   (place)     │    (measure 1 plate) │  (swap disks)
-  └───────────────────┘                  └───────────────────┘
-        ▲                                      │
-        │   done                              │
-        └─────────────────────────────────────┘
+  MENU ──"Calibrate"──► STATE_CAL_LOW ──C──► STATE_CAL_HIGH ──C──► fit line ──► MENU
+                        (place BROWN,        (place RED,           (compute
+                         press C to          press C to            cal0/cal1,
+                         sample x3)          sample x3)            store, show OK)
 ```
 
 Steps:
 
-1. Enter Calibrate. Prompt **"Place LOW (brown)"**.
-2. Measure. Steps the to **Low** (default) or **High/Red** if the next button is
-   pressed, or auto-selects based on prompt. Measure `N` samples, average.
-3. Prompt **"Place HIGH (red)"** → same measurement.
-4. Lift & swap the disks. Measure the second plate.
-5. The code confirms each plate was measured within its **acceptance window**
-   (§5). If a plate is off-target, it warns and can reject/re-run.
-6. Compute calibration line (§5). Save into a new `profile[]`.
+1. **Enter Calibrate.** Prompt: `Place LOW (brown), press C`.
+2. On **C**: take **3 samples**, average, store `ratio_low`. Prompt:
+   `Place HIGH (red), press C`.
+3. On **C**: take **3 samples**, average, store `ratio_high`. Then:
+   - Guard: if `ratio_high ≈ ratio_low` → line degenerate → show `Cal FAILED:
+     plates too similar`, discard, return to menu.
+   - Otherwise compute `cal0`/`cal1`, mark the profile `valid`, show
+     `Cal OK`, return to menu.
 
-> **Scope note:** this is a replacement *in addition to* the per-channel
-> white-reference correction. The per-channel `calibrationFactors[]` correction
-> is still needed to turn cumulative/relative readings into physical-ish units.
-> So calibration = white reference (existing) + two-plate colour line (this doc).
+Button C also collapses to MENU at any point (consistent with the rest of the
+UI). No extra sub-menu, no per-plate re-run wizard in V1 — if a plate is wrong,
+the operator just re-runs Calibrate.
 
-## 4. The math (ADAPTED from R/B → 18 channels)
+"**3 measurements**" appears twice on purpose and means the same thing
+everywhere: **each act of measuring = 3 samples averaged into one value.** Used
+for each calibration plate AND for each post-calibration sample reading. One
+constant governs it:
 
-Toneone fits **red/blue ratio**:
-
-```
-rb_low  = redavg / blueavg     # brown disk
-rb_high = redavg / blueavg     # red disk
-cal[0]  = (HIGH_TARGET - LOW_TARGET) / (rb_high - rb_low)
-cal[1]  = LOW_TARGET  - cal[0] * rb_low
-v       = cal[0] * (r/b) + cal[1]
-T       = scale[0]*v^3 + scale[1]*v^2 + scale[2]*v + scale[3]
+```c
+static const int CAL_SAMPLES = 3;   // samples averaged per measurement
 ```
 
-On the AS7265X "red" and "blue" are no longer raw 2-channel values — **every
-channel is a wavelength**. The analog of R/B is a **narrowband ratio** computed
-from selected channels. The design picks two calibration channels that best
-separate the two disks (mirrors the red/blue separation Toneone relies on).
+---
 
-Let the two chosen channels be `ChRed` and `ChBlue` (see §6). Define per plate:
+## 4. The math (Tonino's actual two-stage pipeline)
+
+Verified against the Tonino firmware
+(`myTonino/Tonino-Firmware`, `Tonino/tonino_tcs3200.{h,cpp}`). Tonino uses **two
+stages**, not one line. We reproduce both for parity.
+
+### Stage 1 — calibration line (fitted from the two plates)
+
+Per plate, average `CAL_SAMPLES` samples and form the channel ratio:
 
 ```
-rx = raw(ChRed),  bx = raw(ChBlue)          # averages of the plate's N samples
-ratio = rx / bx
+ratio = value[chRed] / value[chBlue]
 ```
 
-Two-point line is identical in spirit; `x` is now the channel-ratio `rx/bx`:
+Tonino pins the two plates to **fixed target ratios** (not 0/100) and fits a line
+in ratio→`v` space (Tonino `tonino_tcs3200.h`):
+
+```c
+static const float LOW_TARGET  = 1.5f;   // brown disk target r/b  (Tonino LOW_TARGET)
+static const float HIGH_TARGET = 3.7f;   // red   disk target r/b  (Tonino HIGH_TARGET)
+```
 
 ```
 cal0 = (HIGH_TARGET - LOW_TARGET) / (ratio_high - ratio_low)
-cal1 =  LOW_TARGET  - cal0 * ratio_low
-y     = cal0 * ratio  + cal1                       # the calibrated "v" value
+cal1 =  LOW_TARGET - cal0 * ratio_low
+v    =  cal0 * ratio + cal1              // calibrated ratio for a sample
 ```
 
-`y` can then be rendered as a colour bar / temperature scale just like Toneone.
-We **drop the cubic T polynomial** by default: with an 18-channel spectrum we
-can compute any colour from ALL channels (e.g. XYZ / sRGB), which is more robust
-than a 2-point fit. Keeping Toneone's cubic is an option for backwards parity —
-see §8.
+(Tonino's factory defaults before any user calibration are
+`cal0 = 1.011949`, `cal1 = -0.094599` — use these as the pre-calibration
+fallback so the meter still reads something sane un-calibrated.)
 
-## 5. Acceptance windows (Toneone constants, carried over)
+### Stage 2 — scale polynomial (fixed, maps v → Tonino number)
 
-Each plate must fall inside its target band to be accepted:
-
-| Plate | red channel target band | blue channel target band |
-| :--- | :--- | :--- |
-| **LOW (brown)** | `abs(r - 2600) < 2100` | `abs(b - 1600) < 1500` |
-| **HIGH (red)**  | `abs(r - 15000) < 7000` | `abs(b - 3600) < 2100` |
-
-- `r`, `b` are the averaged (and per-channel calibrated) values of `ChRed`/`ChBlue`.
-- These thresholds were tuned for the **TCS3200's** raw range. The AS7265X ADC
-  scale differs (and gains are 1x/3.7x/16x/64x). **These numbers MUST be
-  re-derived on the AS7265X before shipping** — see §9. Until verified, treat
-  them as the *template* (same names/structure: `LOW_*, HIGH_*, *_RANGE_*`).
-
-Two sanity checks when the fit would be degenerate:
-- If `ratio_high ≈ ratio_low` → calibration line near-vertical → warn, reject.
-- If either window fails by a lot → refuse to compute; let operator re-place disk.
-
-## 6. Which AS7265X channels to use
-
-Toneone uses the TCS3200's only red and blue photodiodes. The AS7265X has an
-18-channel array; we should **not** hardcode arbitrary channels but instead:
-
-- Default to a sensible pair that maximally separates red from blue (e.g. the
-  `H` channel ≈ 645 nm for "red" and `F` ≈ 535 nm for "blue", or the factory
-  "red"/"blue" bands the AS7265X firmware exposes), then
-- Optionally let calibration store the pair, so it's tunable/validated later.
-
-Channel choice is the biggest hardware-specific decision → verify the channel
-R/B contrast on the specific disks before committing. See §9.
-
-## 7. Data structures
-
-Add a separate colour-profile table (do not mix into `getters[]` polling):
+Tonino then maps `v` to the displayed roast number with a fixed cubic
+(`tonino.h` DEFAULT_SCALE_*):
 
 ```c
-// Per chosen channel: raw + calibrated, averaged over the plate samples.
-typedef struct {
-  float calibrated;        // averaged calibrated reading on the chosen channel
-  float raw;               // (if using getRawX — see REVIEW_ISSUES item 1)
-  bool  accepted;          // inside its acceptance window?
-} plateMeasurement_t;
-
-// Two-point calibration line (red/blue channel-ratio domain).
-typedef struct {
-  // For "red" disk
-  float ratio;             // r/b
-  bool  accepted;
-  // For "brown" disk
-  float ratio_low;
-  bool  accepted_low;
-  // Fits line: y = slope * ratio + intercept
-  float slope;             // calibrationFactor equivalent for the ratio
-  float intercept;
-  int  ChRed;              // chosen red channel index
-  int  ChBlue;             // chosen blue channel index
-} colour_calibration_t;
+static const float SCALE_0 = 0.0f;          // Tonino DEFAULT_SCALE_0
+static const float SCALE_1 = 0.0f;          // Tonino DEFAULT_SCALE_1
+static const float SCALE_2 = 102.2727273f;  // Tonino DEFAULT_SCALE_2
+static const float SCALE_3 = -128.4090909f; // Tonino DEFAULT_SCALE_3
 ```
 
-`colour_calibration_t` lives alongside `float calibrationFactors[18]` at file
-scope (currently the profile is a set of locals that never persists — see
-REVIEW_ISSUES §4 item 4; this adds the same persistence gap, call out at §8).
+```
+T = SCALE_0*v^3 + SCALE_1*v^2 + SCALE_2*v + SCALE_3
+```
 
-## 8. Interaction with the existing calibration
+Because `SCALE_0 == SCALE_1 == 0`, this is **effectively linear**:
+`T = 102.2727273 * v - 128.4090909`. The Tonino scale runs roughly **0 (very
+dark) to ~140 (very light)**; typical roasts land ~60–130. Keeping the cubic
+form (with the two leading terms zero) means we can drop in Tonino's real cubic
+later without changing code shape.
 
-- **Keep** `calibrationFactors[18]` (per-channel white-reference correction).
-- **Add** `colour_calibration_t` (R/B line) for the optional two-plate mode.
-- Measurement reads the same channels via the existing `getters[]` polling with
-  `.getCalibrated*`, but for the colour path you additionally grab the two chosen
-  channels per sample to build `ratio`.
-- Do **not** remove the per-channel code; the two systems are independent axes.
+### Summary
 
-## 9. What MUST be verified on hardware (do the work before coding)
+```
+ratio → [Stage 1: v = cal0*ratio + cal1] → [Stage 2: T = poly(v)] → roast number
+```
 
-The design is shaped by Toneone values that are **TCS3200-specific**. Before any
-code change, confirm on the AS7265X / actual disks:
+Stage 1 is what calibration fits (from your two disks). Stage 2 is a fixed
+Tonino-derived constant. The only V1 guard is the degenerate-line check from §3
+(`ratio_high ≈ ratio_low` → reject). No acceptance windows.
 
-1. **Channel R/B contrast** — does `ChRed`≫`ChBlue` on both disks? If not, pick
-   different channels (or note it as a limitation).
-2. **Acceptance constants** — re-derive `LOW_*/HIGH_*/*_RANGE_*` for the AS7265X
-   raw ADC scale (and per gain).
-3. **Cumulative-reading bug** — REVIEW_ISSUES item 1 says `getCalibratedX()`
-   may accumulate; averaging cumulative values is invalid. If true, read
-   `getRawX()` (`getDeltaX` as a fallback) instead, and average fresh samples —
-   applies to *both* the white-reference and the two-plate math.
-4. **Gain** — choose/optimize a gain (setup uses gain 2 = 16x) that keeps both
-   disks within range without saturating.
-5. **Persistence** — store the fitted profile (`slope/intercept` + channel pair)
-   in flash/EEPROM so recalibration isn't lost on power cycle (extends item 4).
+> **Note on parity vs. our chart:** `T` is the Tonino roast *number*. The 7
+> roast *labels* (ultra light … ultra dark) the UI shows are just bucketed `T`
+> ranges — a separate UI concern, decided in the score session, not here.
 
-## 10. Out of scope (for now)
+---
 
-- XYZ/sRGB derivation, colour rendering on the TFT, temperature output via T —
-  optional follow-ups. Default is to reproduce Toneone's ratio→colour bar.
-- Multi-level fit (>2 plates) — this is explicitly a **two-point** calibration.
+## 5. Channel choice
+
+Tonino has only red + blue photodiodes and defines colour as `red/blue`. The
+AS7265X has 18 channels, so we pick **one red-ish and one blue-ish channel** and
+store the pair in the profile so it is tunable later without changing the math:
+
+```c
+static const int DEFAULT_CH_RED  = 9;   // ~645 nm (red)   — index into values[]
+static const int DEFAULT_CH_BLUE = 2;   // ~460 nm (blue)  — index into values[]
+```
+
+(Indices are into the existing ascending-wavelength `values[]`/`freq[]` arrays:
+645 nm is index 9, 460 nm is index 2.) The pair is stored in the profile
+(§6). Auto-selecting the best-separating pair is **deferred** (Appendix A §6).
+
+> **Verify on hardware (§7):** confirm `value[chRed] > value[chBlue]` on BOTH
+> disks and that the two disks give clearly different ratios. If not, change the
+> two constants above — no other code changes needed.
+
+---
+
+## 6. Data structure (minimal)
+
+Only the **Stage 1** fitted line (`cal0`/`cal1`) + the channel pair persist. The
+Stage 2 scale polynomial is a fixed Tonino-derived global constant (§4), not
+per-calibration, so it is NOT stored here. Per-plate ratios are transient (used
+during the fit, then discarded).
+
+```c
+struct ColourCalibration {
+  float cal0;        // Stage-1 slope     (from §4; factory default 1.011949)
+  float cal1;        // Stage-1 intercept (from §4; factory default -0.094599)
+  int   chRed;       // chosen red channel index  (defaults to DEFAULT_CH_RED)
+  int   chBlue;      // chosen blue channel index (defaults to DEFAULT_CH_BLUE)
+  bool  valid;       // true once a good 2-point fit has been stored
+};
+
+ColourCalibration colourCal;   // file scope, next to calibrationFactors[18]
+```
+
+That's the whole profile. Compare to the earlier 8-field struct that stored
+both plates' raw readings — not needed for V1. The roast number is then
+`T = poly(cal0*ratio + cal1)` using the fixed `SCALE_*` constants from §4.
+
+---
+
+## 6a. Persistence (EEPROM → flash on the WIO Terminal)
+
+Yes — calibration should survive a power cycle, so it must be stored in
+non-volatile memory. Two important hardware facts:
+
+- **The WIO Terminal's SAMD51 has no true EEPROM.** Persistence is done by
+  **emulating EEPROM in flash**. The standard Arduino library for this on
+  SAMD21/SAMD51 is **`FlashStorage`** (`cmaglie/FlashStorage`), which the
+  official Arduino docs recommend for exactly this case. A hardened variant
+  (`Xorlent/SAMD_SafeFlashStorage`) adds protection against corruption if power
+  is lost mid-write.
+- **We cannot copy Tonino's persistence code.** Tonino runs on an AVR with real
+  `EEPROM.h` (and even does redundant write cycles — `EEPROM_REDUNDANT_CYCLES`).
+  On the SAMD51 that API isn't the right one; use `FlashStorage`.
+
+### What to persist
+
+Store one small blob with a version tag and a magic marker so a blank/older
+flash is detected and safely ignored (falls back to defaults):
+
+```c
+struct PersistedCalibration {
+  uint32_t magic;            // e.g. 0xB3A11CAL — "is this ours?"
+  uint16_t version;          // bump when the layout changes
+  float    calibrationFactors[18]; // existing white-reference correction (item 4)
+  ColourCalibration colourCal;     // the two-plate colour line (§6)
+  uint32_t crc;              // optional integrity check over the bytes above
+};
+```
+
+Persisting BOTH the white-reference factors AND `colourCal` in one blob closes
+REVIEW_ISSUES item 4 (white-reference never saved) at the same time.
+
+### Sketch of the flow
+
+```c
+#include <FlashStorage.h>
+FlashStorage(calStore, PersistedCalibration);   // reserves a flash slot
+
+// boot: load if valid, else defaults
+PersistedCalibration p = calStore.read();
+if (p.magic == CAL_MAGIC && p.version == CAL_VERSION /* && crc ok */) {
+  memcpy(calibrationFactors, p.calibrationFactors, sizeof(calibrationFactors));
+  colourCal = p.colourCal;
+} else {
+  // initMap() already sets calibrationFactors[]=1.0; set colourCal defaults
+  colourCal = { DEFAULT_CAL_0, DEFAULT_CAL_1, DEFAULT_CH_RED, DEFAULT_CH_BLUE, false };
+}
+
+// after a successful calibration: fill p, set magic/version/crc, then
+calStore.write(p);   // commits to flash
+```
+
+### Caveats (must respect on hardware)
+
+- **Flash wear.** SAMD flash endurance is limited (~10k–100k writes). Only write
+  on an explicit successful calibration — **never** per measurement or per loop.
+- **Write cost / blocking.** A flash write erases a page and blocks briefly; it
+  is fine as a one-off at end-of-calibration, not in the hot path.
+- **A re-flash of the sketch may erase the emulated-EEPROM region** depending on
+  the upload; treat stored calibration as "survives power cycles," and expect it
+  may need re-doing after a firmware update. Note this in the UI/README.
+- **Verify the write actually persisted** by reading it back once after
+  `write()` during bring-up.
+
+Until `FlashStorage` is wired in, V1 may keep `colourCal` in RAM and require
+recalibration on boot — but the intent is flash persistence per this section.
+
+---
+
+## 7. What MUST be verified on hardware (before writing the fit math)
+
+These are the only hardware unknowns V1 depends on. Resolve them first.
+
+1. **Cumulative-getter question (blocking — REVIEW_ISSUES item 1).** If
+   `getCalibratedX()` accumulates, averaging it is invalid and BOTH the existing
+   white-reference math and this ratio are built on bad data. Confirm with a
+   diagnostic (print `getRawX` vs `getCalibratedX` for one channel over several
+   reads). If calibrated accumulates, read `getRawX()` for the ratio instead.
+   **Do not write the fit until this is settled.**
+2. **Channel contrast (§5).** `chRed > chBlue` on both disks, and the two disks
+   give clearly separated ratios. Adjust the two channel constants if not.
+3. **Gain.** Pick a gain (setup currently uses gain 2 = 16x) that keeps both
+   disks in range without saturating either channel.
+4. **Persistence (see §6a).** Store `colourCal` **and** `calibrationFactors[18]`
+   in flash via `FlashStorage` so they survive a power cycle (closes
+   REVIEW_ISSUES item 4). Verify a written blob reads back correctly, and
+   confirm whether a sketch re-flash wipes the emulated-EEPROM region on this
+   board. If persistence isn't wired yet, V1 keeps it in RAM and recalibrates on
+   boot — call that out in the UI.
+
+---
+
+## 8. Deferred / out of scope for V1
+
+- Acceptance windows / the TCS3200 constants (`2600`, `15000`, `*_RANGE_*`).
+  They are meaningless on the AS7265X ADC scale and can't be trusted without
+  re-derivation; the degenerate-line guard is the only check V1 keeps.
+- Automatic best-channel-pair selection.
+- XYZ / sRGB colour derivation and TFT colour rendering.
+- A non-trivial cubic. Note: V1 **keeps** Tonino's Stage-2 scale polynomial (§4)
+  but with its two leading terms zero (so it is effectively linear). Fitting a
+  genuinely cubic v→number curve (or a separate temperature `T` output) is what
+  is deferred here, not the scale step itself.
+- Multi-plate (>2) fits.
+
+All of the above are captured in Appendix A for when V1 is proven.
+
+---
+
+## Appendix A — Full spectrophotometer-grade design (original, deferred)
+
+> This is the earlier, larger design. It is the long-term vision, NOT the V1
+> plan. Kept verbatim-in-spirit so the reasoning is not lost.
+
+**A.1 Tonino vs AS7265X.** Tonino is built around the TCS3200 colour sensor: it
+measures only red and blue channels, colour = R/B ratio, two disks (brown/red)
+define the calibration line. The AS7265X is an 18-channel spectrophotometer
+(410 → 940 nm), so "two known reflectance disks → define a scale" still applies,
+but the math is against selected channels, and richer colour can be computed
+from all 18 channels.
+
+**A.2 Acceptance windows (Tonino constants, TCS3200-specific).**
+
+| Plate | red target band | blue target band |
+| :--- | :--- | :--- |
+| LOW (brown) | abs(r - 2600) < 2100  | abs(b - 1600) < 1500 |
+| HIGH (red)  | abs(r - 15000) < 7000 | abs(b - 3600) < 2100 |
+
+These MUST be re-derived on the AS7265X (different ADC scale + gains) before
+they mean anything. Two degeneracy checks: reject if `ratio_high ≈ ratio_low`
+(near-vertical line) or if a window fails badly (bad placement).
+
+**A.3 Cubic temperature mapping (Tonino parity option).**
+`T = scale[0]*v^3 + scale[1]*v^2 + scale[2]*v + scale[3]` — optional, for
+backwards parity with Tonino's temperature output. V1 drops it.
+
+**A.4 Channel auto-selection.** Rather than hardcoding red/blue channels, scan
+for the channel pair that maximally separates the two disks, or use the factory
+"red"/"blue" bands the firmware exposes. Biggest hardware-specific decision;
+validate contrast on the actual disks first.
+
+**A.5 Richer colour.** With 18 channels, compute XYZ → sRGB for a true colour
+swatch on the TFT, which is more robust than a 2-point ratio fit. Optional
+follow-up.
+
+**A.6 Fuller profile struct** (the original 8-field version storing both plates'
+raw + calibrated readings and per-plate `accepted` flags) — only needed if the
+acceptance windows and re-run wizard are implemented.
+
+---
+
+## 9. Interaction with existing calibration (unchanged from original intent)
+
+- Keep `calibrationFactors[18]` (per-channel white-reference correction) — it is
+  a **separate axis** from the two-plate colour line.
+- The two systems are independent: white-reference normalises per-channel
+  magnitude; the two-plate line maps a channel ratio to a roast number.
+- The colour path reads the two chosen channels straight out of the existing
+  `values[]` (populated by the normal 18-channel sampling loop) — no parallel
+  sampling path.
+- Do not remove the per-channel code.
