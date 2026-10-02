@@ -12,10 +12,6 @@
 #include <Wire.h>
 #include <FlashStorage_SAMD.h> // flash-emulated EEPROM on SAMD51 (WIO Terminal)
 
-// Set to 1 to run the raw-vs-calibrated diagnostic once at boot (design §7
-// item 1 / REVIEW_ISSUES item 1). Set to 0 once the getter question is settled.
-#define CAL_DIAG_ON_BOOT 0
-
 #define LGFX_AUTODETECT
 #include "SparkFun_AS7265X.h" // Click here to get the library: http://librarymanager/All#SparkFun_AS7265X
 #include "button.h"
@@ -172,10 +168,6 @@ void setup()
     byte buildFirmwareVersion = sensor.getBuildFirmwareVersion();
     Serial.print("Build Firmware Version: 0x");
     Serial.println(buildFirmwareVersion, HEX);
-
-#if CAL_DIAG_ON_BOOT
-    diagRawVsCalibrated(); // one-time bring-up check for REVIEW_ISSUES item 1
-#endif
   }
 
   Serial.println("A,B,C,D,E,F,G,H,I,J,K,L,R,S,T,U,V,W");
@@ -212,18 +204,35 @@ static const char *freq[18] =
 };
 
 int rmap[18];
-float calibrationFactors[18]; // Multipliers for each channel
+
+// ===================== Three-stage calibration model ===========================
+// Stage 1: Dark offset (per-channel black reference)
+static uint16_t darkOffsets[18] = {
+  0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0
+};
+
+// Stage 2: White reference (per-channel normalization baseline)
+static uint16_t whiteReference[18] = {
+  8000, 8000, 8000, 8000, 8000, 8000,
+  8000, 8000, 8000, 8000, 8000, 8000,
+  8000, 8000, 8000, 8000, 8000, 8000
+};
+
+// Stage 2 (continued): Per-channel calibration factors (fine tuning post-normalization)
+float calibrationFactors[18];
 
 // ===================== Two-plate (Tonino-lite) colour calibration ==========
 // See design_calibration.md V1. Two reference disks (brown=low, red=high)
 // define a line in channel-ratio space; a fixed scale polynomial maps that to
-// the Tonino roast number. Constants below are the real Tonino values.
+// the Tonino roast number. 860nm (NIR) is the roast development indicator.
 
 static const int   CAL_SAMPLES  = 3;          // samples averaged per measurement
 
 // Stage-1 target ratios the two plates are pinned to (Tonino tonino_tcs3200.h).
-static const float LOW_TARGET   = 1.5f;       // brown disk target r/b
-static const float HIGH_TARGET  = 3.7f;       // red   disk target r/b
+static const float LOW_TARGET   = 1.5f;       // brown disk target r/nir
+static const float HIGH_TARGET  = 3.7f;       // red   disk target r/nir
 
 // Stage-1 factory defaults (Tonino tonino.h) used before any user calibration.
 static const float DEFAULT_CAL_0 = 1.011949f;
@@ -236,10 +245,9 @@ static const float SCALE_1 = 0.0f;
 static const float SCALE_2 = 102.2727273f;
 static const float SCALE_3 = -128.4090909f;
 
-// Chosen red/blue channels (indices into values[]/freq[]). Verify on hardware
-// (design §5/§7): red channel must read higher than blue on both disks.
+// Chosen channels: red (645nm) and NIR (860nm for roast development)
 static const int   DEFAULT_CH_RED  = 9;       // ~645 nm (red)
-static const int   DEFAULT_CH_BLUE = 2;       // ~460 nm (blue)
+static const int   DEFAULT_CH_NIR  = 15;      // ~860 nm (near-infrared, roast development)
 
 // Reject a near-vertical (degenerate) fit (design §3).
 static const float MIN_RATIO_SEPARATION = 0.05f;
@@ -249,26 +257,47 @@ struct ColourCalibration {
   float cal0;    // Stage-1 slope
   float cal1;    // Stage-1 intercept
   int   chRed;   // chosen red channel index
-  int   chBlue;  // chosen blue channel index
+  int   chNIR;   // chosen NIR channel index (roast development)
   bool  valid;   // true once a good 2-point fit has been stored
 };
 
 ColourCalibration colourCal = {
-  DEFAULT_CAL_0, DEFAULT_CAL_1, DEFAULT_CH_RED, DEFAULT_CH_BLUE, false
+  DEFAULT_CAL_0, DEFAULT_CAL_1, DEFAULT_CH_RED, DEFAULT_CH_NIR, false
 };
 
-// Persisted blob (white-reference factors + colour line) — design §6a.
+// Persisted blob (three-stage calibration: dark, white, colour line) — design §6a.
 static const uint32_t CAL_MAGIC   = 0xB3A11CALu; // "is this ours?"
-static const uint16_t CAL_VERSION = 1;
+static const uint16_t CAL_VERSION = 2;           // bumped for three-stage model
 
 struct PersistedCalibration {
   uint32_t magic;
   uint16_t version;
+  uint16_t darkOffsets[18];
+  uint16_t whiteReference[18];
   float    calibrationFactors[18];
   ColourCalibration colourCal;
 };
 
 FlashStorage(calStore, PersistedCalibration); // reserves one flash slot
+
+// ===================== Calibration pipeline helper ==============================
+// Apply the three-stage pipeline to a raw sensor value.
+// Returns: normalized and calibrated float value.
+float applyCalibratedPipeline(int ch, uint16_t raw)
+{
+  // Stage 1: dark offset removal
+  float darkCorrected = (float)raw - (float)darkOffsets[ch];
+  
+  // Stage 2: white reference normalization
+  float whiteNorm = (float)whiteReference[ch] - (float)darkOffsets[ch];
+  if (whiteNorm < 1.0f) whiteNorm = 1.0f; // guard against division by zero
+  float normalized = darkCorrected / whiteNorm;
+  
+  // Stage 2 (continued): per-channel calibration factor
+  float calibrated = normalized * calibrationFactors[ch];
+  
+  return calibrated;
+}
 
 // Map an averaged channel ratio to the Tonino roast number (Stage 1 + Stage 2).
 float roastNumberFromRatio(float ratio)
@@ -585,7 +614,7 @@ void performMeasurement() {
     disableBulbs();
   }
 
-  // Use raw getters (uint16_t) — all calibration is in firmware
+  // Use raw getters (uint16_t) — apply three-stage calibration pipeline
   uint16_t (AS7265X::*rawGetters[])() = {
     &AS7265X::getA, &AS7265X::getB, &AS7265X::getC,
     &AS7265X::getD, &AS7265X::getE, &AS7265X::getF,
@@ -597,8 +626,8 @@ void performMeasurement() {
 
   Serial.print("$L,");
   for (int n = 0; n < 18; n++) {
-    float v = (float)(sensor.*rawGetters[n])(); // convert uint16_t to float
-    v *= calibrationFactors[n]; // apply firmware calibration
+    uint16_t raw = (sensor.*rawGetters[n])();
+    float v = applyCalibratedPipeline(n, raw);
     showValue(n, v);
     Serial.print(v);
     if (n < 17) Serial.print(",");
@@ -607,9 +636,11 @@ void performMeasurement() {
   showValues();
 
   // Roast score from the two chosen channels' ratio (design §4).
+  // Using red (645nm) / NIR (860nm) for roast development
   {
-    float b = values[colourCal.chBlue];
-    float ratio = (b > 0.0f) ? (values[colourCal.chRed] / b) : 0.0f;
+    float red = values[colourCal.chRed];
+    float nir = values[colourCal.chNIR];
+    float ratio = (nir > 0.0f) ? (red / nir) : 0.0f;
     showScore(ratio);
     Serial.print("$R,");
     Serial.print(ratio, 5);
@@ -638,15 +669,18 @@ void performMeasurement() {
 
 // ===================== Persistence (design §6a) ============================
 // Load persisted calibration if the flash slot holds a valid, matching blob;
-// otherwise keep the compiled-in defaults (calibrationFactors[]=1.0 from
-// initMap(), colourCal = factory defaults).
+// otherwise keep the compiled-in defaults.
 void loadCalibration() {
   PersistedCalibration p;
   calStore.read(p); // FlashStorage_SAMD: read via out-parameter
   if (p.magic == CAL_MAGIC && p.version == CAL_VERSION) {
-    for (int i = 0; i < 18; i++) calibrationFactors[i] = p.calibrationFactors[i];
+    for (int i = 0; i < 18; i++) {
+      darkOffsets[i] = p.darkOffsets[i];
+      whiteReference[i] = p.whiteReference[i];
+      calibrationFactors[i] = p.calibrationFactors[i];
+    }
     colourCal = p.colourCal;
-    Serial.println("Calibration loaded from flash.");
+    Serial.println("Calibration loaded from flash (three-stage model).");
   } else {
     Serial.println("No valid calibration in flash; using defaults.");
   }
@@ -658,7 +692,11 @@ void saveCalibration() {
   PersistedCalibration p;
   p.magic = CAL_MAGIC;
   p.version = CAL_VERSION;
-  for (int i = 0; i < 18; i++) p.calibrationFactors[i] = calibrationFactors[i];
+  for (int i = 0; i < 18; i++) {
+    p.darkOffsets[i] = darkOffsets[i];
+    p.whiteReference[i] = whiteReference[i];
+    p.calibrationFactors[i] = calibrationFactors[i];
+  }
   p.colourCal = colourCal;
   calStore.write(p);
 
@@ -666,20 +704,20 @@ void saveCalibration() {
   PersistedCalibration back;
   calStore.read(back);
   if (back.magic == CAL_MAGIC && back.colourCal.valid == colourCal.valid) {
-    Serial.println("Calibration saved to flash (verified).");
+    Serial.println("Calibration saved to flash (verified, three-stage model).");
   } else {
     Serial.println("WARNING: calibration flash write did not verify.");
   }
 }
 
 // ===================== Shared sampling =====================================
-// Take one fresh measurement into values[] via the raw getters + rmap.
-// All calibration is applied in firmware via calibrationFactors[].
+// Take one fresh measurement into values[] via the raw getters + calibration pipeline.
+// All calibration is applied in firmware via dark/white/per-channel stages.
 void sampleChannelsOnce() {
   if (withLed) sensor.takeMeasurementsWithBulb();
   else sensor.takeMeasurements();
 
-  // Use raw getters (uint16_t) — all calibration is in firmware
+  // Use raw getters (uint16_t) — apply three-stage calibration pipeline
   uint16_t (AS7265X::*rawGetters[])() = {
     &AS7265X::getA, &AS7265X::getB, &AS7265X::getC,
     &AS7265X::getD, &AS7265X::getE, &AS7265X::getF,
@@ -689,38 +727,24 @@ void sampleChannelsOnce() {
     &AS7265X::getU, &AS7265X::getV, &AS7265X::getW
   };
   for (int n = 0; n < 18; n++) {
-    float v = (float)(sensor.*rawGetters[n])(); // convert uint16_t to float, apply calibration
-    v *= calibrationFactors[n];
+    uint16_t raw = (sensor.*rawGetters[n])();
+    float v = applyCalibratedPipeline(n, raw);
     showValue(n, v);
   }
 }
 
-// Average CAL_SAMPLES fresh reads and return the chosen red/blue channel ratio.
+// Average CAL_SAMPLES fresh reads and return the chosen red/NIR channel ratio.
 float samplePlateRatio() {
-  float rSum = 0, bSum = 0;
+  float rSum = 0, nirSum = 0;
   for (int s = 0; s < CAL_SAMPLES; s++) {
     sampleChannelsOnce();
     rSum += values[colourCal.chRed];
-    bSum += values[colourCal.chBlue];
+    nirSum += values[colourCal.chNIR];
     delay(150);
   }
   float rAvg = rSum / CAL_SAMPLES;
-  float bAvg = bSum / CAL_SAMPLES;
-  return (bAvg > 0.0f) ? (rAvg / bAvg) : 0.0f;
-}
-
-// ===================== Diagnostic (design §7 item 1) =======================
-// Print raw values for channel A across several reads.
-// Helps verify sensor behavior during bring-up.
-void diagRawVsCalibrated() {
-  if (!sensorReady) { Serial.println("diag: no sensor"); return; }
-  Serial.println("diag: raw reads of channel A (~410nm):");
-  for (int i = 0; i < 5; i++) {
-    if (withLed) sensor.takeMeasurementsWithBulb();
-    else sensor.takeMeasurements();
-    Serial.print("  raw="); Serial.println(sensor.getA());
-    delay(200);
-  }
+  float nirAvg = nirSum / CAL_SAMPLES;
+  return (nirAvg > 0.0f) ? (rAvg / nirAvg) : 0.0f;
 }
 
 // ===================== Two-plate calibration flow ==========================
