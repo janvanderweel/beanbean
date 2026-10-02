@@ -353,6 +353,7 @@ static void initMap()
 }
 
 float values[18];
+float rawValues[18];  // raw sensor values (for calibration fitting)
 bool measurementPending = false;
 
 // --- Display layout (screen is 320x240, rotation 1) ---------------------
@@ -711,13 +712,13 @@ void saveCalibration() {
 }
 
 // ===================== Shared sampling =====================================
-// Take one fresh measurement into values[] via the raw getters + calibration pipeline.
-// All calibration is applied in firmware via dark/white/per-channel stages.
+// Take one fresh measurement into values[] + rawValues[] (raw data unmodified by 3-stage pipeline).
+// For calibration, we use raw values directly. For display, we apply the full pipeline.
 void sampleChannelsOnce() {
   if (withLed) sensor.takeMeasurementsWithBulb();
   else sensor.takeMeasurements();
 
-  // Use raw getters (uint16_t) — apply three-stage calibration pipeline
+  // Use raw getters (uint16_t)
   uint16_t (AS7265X::*rawGetters[])() = {
     &AS7265X::getA, &AS7265X::getB, &AS7265X::getC,
     &AS7265X::getD, &AS7265X::getE, &AS7265X::getF,
@@ -728,18 +729,20 @@ void sampleChannelsOnce() {
   };
   for (int n = 0; n < 18; n++) {
     uint16_t raw = (sensor.*rawGetters[n])();
-    float v = applyCalibratedPipeline(n, raw);
+    rawValues[rmap[n]] = (float)raw;  // store raw for calibration
+    float v = applyCalibratedPipeline(n, raw);  // apply full pipeline for display
     showValue(n, v);
   }
 }
 
 // Average CAL_SAMPLES fresh reads and return the chosen red/NIR channel ratio.
+// Uses RAW values (no pipeline) to match Tonino's expected target ratios.
 float samplePlateRatio() {
   float rSum = 0, nirSum = 0;
   for (int s = 0; s < CAL_SAMPLES; s++) {
     sampleChannelsOnce();
-    rSum += values[colourCal.chRed];
-    nirSum += values[colourCal.chNIR];
+    rSum += rawValues[colourCal.chRed];     // use raw values for calibration
+    nirSum += rawValues[colourCal.chNIR];
     delay(150);
   }
   float rAvg = rSum / CAL_SAMPLES;
