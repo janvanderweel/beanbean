@@ -183,27 +183,10 @@ static const char *freq[18] =
 
 int rmap[18];
 
-// ===================== Dark/white normalization (optional, not required for V1) ============
-// We intentionally keep these arrays but disabled by default. The two-plate calibration
-// uses RAW values only; dark/white normalization is a later hardware refinement that needs
-// a black enclosure and a white reference tile, not extra roast disks.
-static bool useDarkWhiteNormalization = false;
-
-static uint16_t darkOffsets[18] = {
-  0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0
-};
-
-static uint16_t whiteReference[18] = {
-  8000, 8000, 8000, 8000, 8000, 8000,
-  8000, 8000, 8000, 8000, 8000, 8000,
-  8000, 8000, 8000, 8000, 8000, 8000
-};
-
-float calibrationFactors[18];
-
 // ===================== Two-plate (Tonino-lite) colour calibration ==========
+// V1: Raw two-plate roast fit. Dark/white normalization deferred until
+// proper hardware reference standards (black enclosure, white tile) are available.
+
 static const int   CAL_SAMPLES  = 3;
 static const float LOW_TARGET   = 1.5f;
 static const float HIGH_TARGET  = 3.7f;
@@ -235,26 +218,13 @@ static const uint16_t CAL_VERSION = 2;
 struct PersistedCalibration {
   uint32_t magic;
   uint16_t version;
-  uint16_t darkOffsets[18];
-  uint16_t whiteReference[18];
-  float    calibrationFactors[18];
+  uint16_t reserved0[18];  // darkOffsets — kept for future use but not applied in V1
+  uint16_t reserved1[18];  // whiteReference — kept for future use but not applied in V1
+  float    reserved2[18];  // calibrationFactors — kept for future use but not applied in V1
   ColourCalibration colourCal;
 };
 
 FlashStorage(calStore, PersistedCalibration);
-
-float applyMeasurementPipeline(int ch, uint16_t raw)
-{
-  if (!useDarkWhiteNormalization) {
-    return (float)raw;
-  }
-
-  float darkCorrected = (float)raw - (float)darkOffsets[ch];
-  float whiteNorm = (float)whiteReference[ch] - (float)darkOffsets[ch];
-  if (whiteNorm < 1.0f) whiteNorm = 1.0f;
-  float normalized = darkCorrected / whiteNorm;
-  return normalized * calibrationFactors[ch];
-}
 
 float roastNumberFromRatio(float ratio)
 {
@@ -291,7 +261,6 @@ static void initMap()
   };
   for (int n = 0; n < 18; ++n)
   {
-    calibrationFactors[n] = 1.0;
     for (int i = 0; i < 18; ++i)
     {
       if (map[i] == n)
@@ -533,9 +502,8 @@ void performMeasurement() {
   for (int n = 0; n < 18; n++) {
     uint16_t raw = (sensor.*rawGetters[n])();
     rawValues[n] = (float)raw;
-    float v = applyMeasurementPipeline(n, raw);
-    showValue(n, v);
-    Serial.print(v);
+    showValue(n, (float)raw);
+    Serial.print(raw);
     if (n < 17) Serial.print(",");
   }
 
@@ -575,13 +543,8 @@ void loadCalibration() {
   PersistedCalibration p;
   calStore.read(p);
   if (p.magic == CAL_MAGIC && p.version == CAL_VERSION) {
-    for (int i = 0; i < 18; i++) {
-      darkOffsets[i] = p.darkOffsets[i];
-      whiteReference[i] = p.whiteReference[i];
-      calibrationFactors[i] = p.calibrationFactors[i];
-    }
     colourCal = p.colourCal;
-    Serial.println("Calibration loaded from flash (two-plate raw fit + optional normalization). ");
+    Serial.println("Calibration loaded from flash (two-plate raw V1).");
   } else {
     Serial.println("No valid calibration in flash; using defaults.");
   }
@@ -591,18 +554,13 @@ void saveCalibration() {
   PersistedCalibration p;
   p.magic = CAL_MAGIC;
   p.version = CAL_VERSION;
-  for (int i = 0; i < 18; i++) {
-    p.darkOffsets[i] = darkOffsets[i];
-    p.whiteReference[i] = whiteReference[i];
-    p.calibrationFactors[i] = calibrationFactors[i];
-  }
   p.colourCal = colourCal;
   calStore.write(p);
 
   PersistedCalibration back;
   calStore.read(back);
   if (back.magic == CAL_MAGIC && back.colourCal.valid == colourCal.valid) {
-    Serial.println("Calibration saved to flash (verified). ");
+    Serial.println("Calibration saved to flash (verified).");
   } else {
     Serial.println("WARNING: calibration flash write did not verify.");
   }
@@ -624,8 +582,6 @@ void sampleChannelsOnce() {
   for (int n = 0; n < 18; ++n) {
     uint16_t raw = (sensor.*rawGetters[n])();
     rawValues[n] = (float)raw;
-    float v = applyMeasurementPipeline(n, raw);
-    values[rmap[n]] = v;
   }
 }
 
@@ -661,15 +617,15 @@ void displayCalHighScreen() {
   lcd.drawString("Press C to sample", 10, 80);
 }
 
+float calibrationRatioLow = 0.0f;
+
 void doCalLow() {
   if (!sensorReady) { currentState = STATE_MENU; displayMenu(); return; }
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
   lcd.drawString("Sampling LOW...", 10, 40);
-  float ratioLowTmp = samplePlateRatio();
-  Serial.print("Cal LOW ratio="); Serial.println(ratioLowTmp, 5);
-  // This is the raw ratio fit; no dark/white stage is required for V1.
-  ratioLow = ratioLowTmp;
+  calibrationRatioLow = samplePlateRatio();
+  Serial.print("Cal LOW ratio="); Serial.println(calibrationRatioLow, 5);
   currentState = STATE_CAL_HIGH;
   displayCalHighScreen();
 }
@@ -682,7 +638,7 @@ void doCalHigh() {
   float ratioHigh = samplePlateRatio();
   Serial.print("Cal HIGH ratio="); Serial.println(ratioHigh, 5);
 
-  if (fabs(ratioHigh - ratioLow) < MIN_RATIO_SEPARATION) {
+  if (fabs(ratioHigh - calibrationRatioLow) < MIN_RATIO_SEPARATION) {
     lcd.fillScreen(TFT_BLACK);
     lcd.setTextColor(TFT_RED);
     lcd.drawString("Cal FAILED:", 10, 40);
@@ -694,8 +650,8 @@ void doCalHigh() {
     return;
   }
 
-  colourCal.cal0 = (HIGH_TARGET - LOW_TARGET) / (ratioHigh - ratioLow);
-  colourCal.cal1 = LOW_TARGET - colourCal.cal0 * ratioLow;
+  colourCal.cal0 = (HIGH_TARGET - LOW_TARGET) / (ratioHigh - calibrationRatioLow);
+  colourCal.cal1 = LOW_TARGET - colourCal.cal0 * calibrationRatioLow;
   colourCal.valid = true;
   Serial.print("cal0="); Serial.print(colourCal.cal0, 5);
   Serial.print(" cal1="); Serial.println(colourCal.cal1, 5);
