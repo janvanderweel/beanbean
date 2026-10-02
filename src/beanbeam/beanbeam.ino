@@ -59,11 +59,7 @@ std::uint32_t colors[18];
 static void initMap();
 void setup()
 {
-  /*int i;
-  char s[20];*/
   Serial.begin(115200);
-  // Wait briefly for the USB Serial monitor so boot diagnostics are visible.
-  // Bounded (~2s) so the device still boots when running standalone.
   for (uint32_t t0 = millis(); !Serial && (millis() - t0) < 2000; ) { }
   Serial.println("AS7265x Spectral Triad");
   lcd.init();
@@ -73,23 +69,10 @@ void setup()
   lcd.fillScreen(0);
   lcd.clear(0);
 
-  // Display the menu
   displayMenu();
-
-  // Initialize current state to MENU
   currentState = STATE_MENU;
 
-  // Sensor initialization. A missing/flaky sensor must NOT freeze the UI:
-  // the menu still needs to run so the device is navigable. We record
-  // whether the sensor came up and gate sensor-dependent work on it.
-  //
-  // The AS7265X is a 3-chip device: begin() first checks the master ACKs at
-  // 0x49, then reads DEV_SELECT_CONTROL over a virtual-register handshake to
-  // confirm the two slave chips. That handshake can time out (returning 0 =>
-  // "slaves not detected") if the slaves haven't finished booting when begin()
-  // runs. Symptom: an I2C scan finds 0x49 but begin() still returns false.
-  // Fix at the source: give the sensor time to power up, then retry begin().
-  delay(500); // let all three AS726x chips finish their power-on boot
+  delay(500);
   for (int attempt = 0; attempt < 5 && !sensorReady; attempt++)
   {
     sensorReady = sensor.begin();
@@ -104,11 +87,6 @@ void setup()
   if (!sensorReady)
   {
     Serial.println("Sensor does not appear to be connected. Please check wiring. Continuing without sensor.");
-
-    // Diagnostic: scan the I2C bus so we can see what actually responds.
-    // AS7265X default address is 0x49 (7-bit). Nothing listed => wiring/power/
-    // pull-up problem on SDA/SCL. 0x49 listed but begin() still fails => the
-    // two slave chips aren't detected (check the Triad's internal ribbon/board).
     Wire.begin();
     Serial.println("I2C scan:");
     lcd.fillScreen(TFT_BLACK);
@@ -139,7 +117,7 @@ void setup()
       Serial.println("  (no I2C devices found)");
       lcd.drawString("  (no I2C devices found)", 5, lineY);
     }
-    delay(4000); // leave the scan on-screen long enough to read
+    delay(4000);
     displayMenu();
   }
 
@@ -191,7 +169,7 @@ void setup()
   colors[16] = lcd.color888(0x4b, 0x00, 0x00); // 900 nm - Infrared
   colors[17] = lcd.color888(0x3c, 0x00, 0x00); // 940 nm - Infrared
   initMap();
-  loadCalibration(); // override defaults with persisted calibration if present
+  loadCalibration();
 }
 
 int led = 0;
@@ -205,69 +183,54 @@ static const char *freq[18] =
 
 int rmap[18];
 
-// ===================== Three-stage calibration model ===========================
-// Stage 1: Dark offset (per-channel black reference)
+// ===================== Dark/white normalization (optional, not required for V1) ============
+// We intentionally keep these arrays but disabled by default. The two-plate calibration
+// uses RAW values only; dark/white normalization is a later hardware refinement that needs
+// a black enclosure and a white reference tile, not extra roast disks.
+static bool useDarkWhiteNormalization = false;
+
 static uint16_t darkOffsets[18] = {
   0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0
 };
 
-// Stage 2: White reference (per-channel normalization baseline)
 static uint16_t whiteReference[18] = {
   8000, 8000, 8000, 8000, 8000, 8000,
   8000, 8000, 8000, 8000, 8000, 8000,
   8000, 8000, 8000, 8000, 8000, 8000
 };
 
-// Stage 2 (continued): Per-channel calibration factors (fine tuning post-normalization)
 float calibrationFactors[18];
 
 // ===================== Two-plate (Tonino-lite) colour calibration ==========
-// See design_calibration.md V1. Two reference disks (brown=low, red=high)
-// define a line in channel-ratio space; a fixed scale polynomial maps that to
-// the Tonino roast number. 860nm (NIR) is the roast development indicator.
-
-static const int   CAL_SAMPLES  = 3;          // samples averaged per measurement
-
-// Stage-1 target ratios the two plates are pinned to (Tonino tonino_tcs3200.h).
-static const float LOW_TARGET   = 1.5f;       // brown disk target r/nir
-static const float HIGH_TARGET  = 3.7f;       // red   disk target r/nir
-
-// Stage-1 factory defaults (Tonino tonino.h) used before any user calibration.
+static const int   CAL_SAMPLES  = 3;
+static const float LOW_TARGET   = 1.5f;
+static const float HIGH_TARGET  = 3.7f;
 static const float DEFAULT_CAL_0 = 1.011949f;
 static const float DEFAULT_CAL_1 = -0.094599f;
-
-// Stage-2 fixed scale polynomial (Tonino tonino.h DEFAULT_SCALE_*).
-// Leading two terms are 0, so it is effectively linear.
 static const float SCALE_0 = 0.0f;
 static const float SCALE_1 = 0.0f;
 static const float SCALE_2 = 102.2727273f;
 static const float SCALE_3 = -128.4090909f;
-
-// Chosen channels: red (645nm) and NIR (860nm for roast development)
-static const int   DEFAULT_CH_RED  = 9;       // ~645 nm (red)
-static const int   DEFAULT_CH_NIR  = 15;      // ~860 nm (near-infrared, roast development)
-
-// Reject a near-vertical (degenerate) fit (design §3).
+static const int   DEFAULT_CH_RED  = 9;  // ~645nm red
+static const int   DEFAULT_CH_NIR  = 15; // ~860nm NIR roast development
 static const float MIN_RATIO_SEPARATION = 0.05f;
 
-// The fitted two-plate colour line + chosen channels (persisted).
 struct ColourCalibration {
-  float cal0;    // Stage-1 slope
-  float cal1;    // Stage-1 intercept
-  int   chRed;   // chosen red channel index
-  int   chNIR;   // chosen NIR channel index (roast development)
-  bool  valid;   // true once a good 2-point fit has been stored
+  float cal0;
+  float cal1;
+  int   chRed;
+  int   chNIR;
+  bool  valid;
 };
 
 ColourCalibration colourCal = {
   DEFAULT_CAL_0, DEFAULT_CAL_1, DEFAULT_CH_RED, DEFAULT_CH_NIR, false
 };
 
-// Persisted blob (three-stage calibration: dark, white, colour line) — design §6a.
-static const uint32_t CAL_MAGIC   = 0xB3A11CALu; // "is this ours?"
-static const uint16_t CAL_VERSION = 2;           // bumped for three-stage model
+static const uint32_t CAL_MAGIC   = 0xB3A11CALu;
+static const uint16_t CAL_VERSION = 2;
 
 struct PersistedCalibration {
   uint32_t magic;
@@ -278,38 +241,27 @@ struct PersistedCalibration {
   ColourCalibration colourCal;
 };
 
-FlashStorage(calStore, PersistedCalibration); // reserves one flash slot
+FlashStorage(calStore, PersistedCalibration);
 
-// ===================== Calibration pipeline helper ==============================
-// Apply the three-stage pipeline to a raw sensor value.
-// Returns: normalized and calibrated float value.
-float applyCalibratedPipeline(int ch, uint16_t raw)
+float applyMeasurementPipeline(int ch, uint16_t raw)
 {
-  // Stage 1: dark offset removal
+  if (!useDarkWhiteNormalization) {
+    return (float)raw;
+  }
+
   float darkCorrected = (float)raw - (float)darkOffsets[ch];
-  
-  // Stage 2: white reference normalization
   float whiteNorm = (float)whiteReference[ch] - (float)darkOffsets[ch];
-  if (whiteNorm < 1.0f) whiteNorm = 1.0f; // guard against division by zero
+  if (whiteNorm < 1.0f) whiteNorm = 1.0f;
   float normalized = darkCorrected / whiteNorm;
-  
-  // Stage 2 (continued): per-channel calibration factor
-  float calibrated = normalized * calibrationFactors[ch];
-  
-  return calibrated;
+  return normalized * calibrationFactors[ch];
 }
 
-// Map an averaged channel ratio to the Tonino roast number (Stage 1 + Stage 2).
 float roastNumberFromRatio(float ratio)
 {
   float v = colourCal.cal0 * ratio + colourCal.cal1;
   return SCALE_0 * v * v * v + SCALE_1 * v * v + SCALE_2 * v + SCALE_3;
 }
 
-// Map the Tonino roast number to one of 7 roast-level labels.
-// Tonino convention: HIGHER number = LIGHTER roast. Thresholds are the upper
-// bound of each (darker) bucket and are TUNABLE — adjust on real roasts.
-// (Provisional; calibrated on the two disks, not on graded roast samples yet.)
 struct RoastBucket { float maxNumber; const char *label; };
 static const RoastBucket roastBuckets[] = {
   {  75.0f, "ULTRA DARK" },
@@ -318,7 +270,7 @@ static const RoastBucket roastBuckets[] = {
   { 125.0f, "MEDIUM" },
   { 140.0f, "MEDIUM-LIGHT" },
   { 155.0f, "LIGHT" },
-  { 1e9f,   "ULTRA LIGHT" }   // everything above the last threshold
+  { 1e9f,   "ULTRA LIGHT" }
 };
 static const int numRoastBuckets = sizeof(roastBuckets) / sizeof(roastBuckets[0]);
 
@@ -329,7 +281,6 @@ const char *roastLabel(float number)
   }
   return roastBuckets[numRoastBuckets - 1].label;
 }
-// ===========================================================================
 
 static void initMap()
 {
@@ -340,8 +291,8 @@ static void initMap()
   };
   for (int n = 0; n < 18; ++n)
   {
-    calibrationFactors[n] = 1.0; // Initialize factors to 1.0
-    for (int i =  0; i < 18; ++i)
+    calibrationFactors[n] = 1.0;
+    for (int i = 0; i < 18; ++i)
     {
       if (map[i] == n)
       {
@@ -353,38 +304,28 @@ static void initMap()
 }
 
 float values[18];
-float rawValues[18];  // raw sensor values (for calibration fitting)
+float rawValues[18];
 bool measurementPending = false;
 
-// --- Display layout (screen is 320x240, rotation 1) ---------------------
-// Bottom half: vertical spectral bar chart.
-// Top half: processed-data panel (roast label + development score).
-// NOTE: the panel currently shows placeholders only. Real calibration and
-// roast-score computation are intentionally deferred to later sessions;
-// nothing here computes a stored metric — bar scaling is UI-only (relative
-// to the current max), the raw/calibrated channel values are untouched.
+static const int CHART_BASELINE_Y = 222;
+static const int CHART_TOP_Y      = 128;
+static const int CHART_LEFT_X     = 6;
+static const int CHART_RIGHT_X    = 314;
 
-static const int CHART_BASELINE_Y = 222; // y of the bar baseline (bars grow up)
-static const int CHART_TOP_Y      = 128; // highest a full-scale bar reaches
-static const int CHART_LEFT_X     = 6;   // left margin of the chart
-static const int CHART_RIGHT_X    = 314; // right margin of the chart
-
-// Spectral bands: consecutive channel ranges [first,last] with a short label.
-// Channels are in ascending-wavelength order (index matches freq[]/values[]).
 struct SpectralBand {
-  int first;          // first channel index in the band
-  int last;           // last channel index in the band
-  const char *label;  // short band label drawn under the group
+  int first;
+  int last;
+  const char *label;
 };
 
 static const SpectralBand bands[] = {
-  {  0,  1, "UV" },    // 410, 435 nm
-  {  2,  3, "BLU" },   // 460, 485 nm
-  {  4,  6, "GRN" },   // 510, 535, 560 nm
-  {  7,  8, "YEL" },   // 585, 610 nm
-  {  9, 11, "RED" },   // 645, 680, 705 nm
-  { 12, 15, "NIR" },   // 730, 760, 810, 860 nm  (near-infrared)
-  { 16, 17, "IR" }     // 900, 940 nm            (infrared)
+  {  0,  1, "UV" },
+  {  2,  3, "BLU" },
+  {  4,  6, "GRN" },
+  {  7,  8, "YEL" },
+  {  9, 11, "RED" },
+  { 12, 15, "NIR" },
+  { 16, 17, "IR" }
 };
 static const int numBands = sizeof(bands) / sizeof(bands[0]);
 
@@ -402,8 +343,6 @@ void disableBulbs()
   sensor.disableBulb(AS7265x_LED_UV);
 }
 
-// Draw the STATIC labels of the top-half processed-data panel (drawn once when
-// entering the measure screen). The dynamic values are drawn by showScore().
 void showResults()
 {
   const int panelTop = 20;
@@ -412,21 +351,15 @@ void showResults()
   lcd.setTextColor(lcd.color888(160, 160, 160));
   lcd.drawString("ROAST", CHART_LEFT_X, panelTop);
   lcd.drawString("TONINO #", CHART_LEFT_X, panelTop + 52);
-
-  // Faint divider between the results panel and the chart.
   lcd.drawFastHLine(0, CHART_TOP_Y - 6, 320, lcd.color888(48, 48, 48));
 }
 
-// Draw the DYNAMIC roast label + Tonino number for the given channel ratio.
-// Called each measurement. Erases its own regions before redrawing so stale
-// (longer) text is cleared. If no valid calibration exists, shows dashes.
 void showScore(float ratio)
 {
   const int panelTop = 20;
   const int labelY = panelTop + 12;
   const int numY   = panelTop + 64;
 
-  // Erase the two value regions (label row + number row).
   lcd.fillRect(CHART_LEFT_X, labelY, 320 - CHART_LEFT_X, 20, TFT_BLACK);
   lcd.fillRect(CHART_LEFT_X, numY,   320 - CHART_LEFT_X, 24, TFT_BLACK);
 
@@ -440,13 +373,10 @@ void showScore(float ratio)
   }
 
   float number = roastNumberFromRatio(ratio);
-
-  // Roast label (size 2 so long names like "MEDIUM-LIGHT" fit the width).
   lcd.setTextSize(2);
   lcd.setTextColor(TFT_WHITE);
   lcd.drawString(roastLabel(number), CHART_LEFT_X, labelY);
 
-  // Tonino number (big).
   char s[16];
   sprintf(s, "%.0f", number);
   lcd.setTextSize(3);
@@ -454,10 +384,6 @@ void showScore(float ratio)
   lcd.drawString(s, CHART_LEFT_X, numY);
 }
 
-// Draw the spectral bar chart in the BOTTOM half of the screen.
-// Bars are vertical (grow upward from CHART_BASELINE_Y), one per channel,
-// scaled relative to the current maximum (UI-only scaling). Per-channel
-// numbers are gone; short band labels are printed under each group instead.
 void showValues(){
   float maxv = 0;
   for (int n = 0; n < 18; ++n)
@@ -467,16 +393,13 @@ void showValues(){
       maxv = values[n];
     }
   }
-  if (maxv < 100.)
-  {
-    maxv = 100.;
-  }
+  if (maxv < 100.) maxv = 100.;
 
   const std::uint32_t gray = lcd.color888(64, 64, 64);
-  const int chartW  = CHART_RIGHT_X - CHART_LEFT_X; // usable width
-  const int chartH  = CHART_BASELINE_Y - CHART_TOP_Y; // full-scale bar height
-  const int pitch   = chartW / 18;                  // per-channel column width
-  const int barW    = pitch - 2;                    // leave a 2px gap
+  const int chartW  = CHART_RIGHT_X - CHART_LEFT_X;
+  const int chartH  = CHART_BASELINE_Y - CHART_TOP_Y;
+  const int pitch   = chartW / 18;
+  const int barW    = pitch - 2;
 
   for (int n = 0; n < 18; ++n)
   {
@@ -486,13 +409,11 @@ void showValues(){
     int h = (int)(value * chartH);
     h = constrain(h, 0, chartH);
 
-    // Unfilled (background) portion above the bar.
     int gapH = chartH - h;
     if (gapH > 0)
     {
       lcd.fillRect(colX, CHART_TOP_Y, barW, gapH, gray);
     }
-    // Filled bar, grown up from the baseline.
     if (h > 0)
     {
       lcd.fillRect(colX, CHART_BASELINE_Y - h, barW, h, colors[n]);
@@ -500,8 +421,6 @@ void showValues(){
   }
 }
 
-// Draw the static band labels + separators under the chart baseline.
-// Called once when entering the measure screen (labels never change).
 void drawChartLabels()
 {
   const int chartW = CHART_RIGHT_X - CHART_LEFT_X;
@@ -515,12 +434,10 @@ void drawChartLabels()
     int endX   = CHART_LEFT_X + (bands[b].last + 1) * pitch;
     int midX   = (startX + endX) / 2;
 
-    // Centre the (short) label under its group.
     int labelW = lcd.textWidth(bands[b].label);
     lcd.setTextColor(TFT_WHITE);
     lcd.drawString(bands[b].label, midX - labelW / 2, labelY);
 
-    // Thin tick between bands.
     if (b < numBands - 1)
     {
       lcd.drawFastVLine(endX - 1, CHART_BASELINE_Y + 1, 2, lcd.color888(90, 90, 90));
@@ -528,23 +445,21 @@ void drawChartLabels()
   }
 }
 
-// Draw the full measure screen chrome once (results panel + chart labels).
-// The live bars are drawn every frame by showValues().
 void drawMeasureScreen()
 {
   lcd.fillScreen(TFT_BLACK);
   showResults();
-  showScore(0.0f); // initial state (dashes / uncalibrated) until first reading
+  showScore(0.0f);
   drawChartLabels();
   lcd.setTextSize(1);
   lcd.setTextColor(TFT_WHITE);
 }
-void showValue(int n, float  value)
+
+void showValue(int n, float value)
 {
   values[rmap[n]] = value;
 }
 
-// Function to display the menu
 void displayMenu() {
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
@@ -554,7 +469,6 @@ void displayMenu() {
 
   for (int i = 0; i < 3; i++) {
     if (i == menuSelection) {
-      // Highlight selected item with a background fill for better UX
       lcd.fillRect(5, 40 + i * 30, 200, 25, TFT_GREEN);
       lcd.setTextColor(TFT_BLACK);
       lcd.drawString(">", 5, 40 + i * 30);
@@ -567,7 +481,6 @@ void displayMenu() {
   }
 }
 
-// Function to display the about screen
 void displayAboutScreen() {
   lcd.setTextSize(2);
   lcd.setTextColor(TFT_WHITE);
@@ -576,11 +489,9 @@ void displayAboutScreen() {
   lcd.drawString("Beanbeam V0.1 alpha", 20, 80);
 }
 
-// Function to perform measurement without blocking the main loop.
 void performMeasurement() {
   if (currentState != STATE_MEASURE) return;
 
-  // No sensor: don't touch I2C (would block/hang). Show a notice instead.
   if (!sensorReady) {
     lcd.setTextSize(1);
     lcd.setTextColor(TFT_RED);
@@ -598,24 +509,17 @@ void performMeasurement() {
     led = !led;
     digitalWrite(LED_BUILTIN, led);
 
-    if (withLed) {
-      enableBulbs();
-    }
+    if (withLed) enableBulbs();
 
     sensor.setMeasurementMode(AS7265X_MEASUREMENT_MODE_6CHAN_ONE_SHOT);
     measurementPending = true;
     return;
   }
 
-  if (!sensor.dataAvailable()) {
-    return;
-  }
+  if (!sensor.dataAvailable()) return;
 
-  if (withLed) {
-    disableBulbs();
-  }
+  if (withLed) disableBulbs();
 
-  // Use raw getters (uint16_t) — apply three-stage calibration pipeline
   uint16_t (AS7265X::*rawGetters[])() = {
     &AS7265X::getA, &AS7265X::getB, &AS7265X::getC,
     &AS7265X::getD, &AS7265X::getE, &AS7265X::getF,
@@ -628,7 +532,8 @@ void performMeasurement() {
   Serial.print("$L,");
   for (int n = 0; n < 18; n++) {
     uint16_t raw = (sensor.*rawGetters[n])();
-    float v = applyCalibratedPipeline(n, raw);
+    rawValues[n] = (float)raw;
+    float v = applyMeasurementPipeline(n, raw);
     showValue(n, v);
     Serial.print(v);
     if (n < 17) Serial.print(",");
@@ -636,11 +541,9 @@ void performMeasurement() {
 
   showValues();
 
-  // Roast score from the two chosen channels' ratio (design §4).
-  // Using red (645nm) / NIR (860nm) for roast development
   {
-    float red = values[colourCal.chRed];
-    float nir = values[colourCal.chNIR];
+    float red = values[rmap[colourCal.chRed]];
+    float nir = values[rmap[colourCal.chNIR]];
     float ratio = (nir > 0.0f) ? (red / nir) : 0.0f;
     showScore(ratio);
     Serial.print("$R,");
@@ -668,12 +571,9 @@ void performMeasurement() {
   measurementPending = false;
 }
 
-// ===================== Persistence (design §6a) ============================
-// Load persisted calibration if the flash slot holds a valid, matching blob;
-// otherwise keep the compiled-in defaults.
 void loadCalibration() {
   PersistedCalibration p;
-  calStore.read(p); // FlashStorage_SAMD: read via out-parameter
+  calStore.read(p);
   if (p.magic == CAL_MAGIC && p.version == CAL_VERSION) {
     for (int i = 0; i < 18; i++) {
       darkOffsets[i] = p.darkOffsets[i];
@@ -681,14 +581,12 @@ void loadCalibration() {
       calibrationFactors[i] = p.calibrationFactors[i];
     }
     colourCal = p.colourCal;
-    Serial.println("Calibration loaded from flash (three-stage model).");
+    Serial.println("Calibration loaded from flash (two-plate raw fit + optional normalization). ");
   } else {
     Serial.println("No valid calibration in flash; using defaults.");
   }
 }
 
-// Write current calibration to flash. Only call after a successful calibration
-// (flash wear) — never per loop/measurement.
 void saveCalibration() {
   PersistedCalibration p;
   p.magic = CAL_MAGIC;
@@ -701,24 +599,19 @@ void saveCalibration() {
   p.colourCal = colourCal;
   calStore.write(p);
 
-  // Read-back verification (bring-up aid, design §6a).
   PersistedCalibration back;
   calStore.read(back);
   if (back.magic == CAL_MAGIC && back.colourCal.valid == colourCal.valid) {
-    Serial.println("Calibration saved to flash (verified, three-stage model).");
+    Serial.println("Calibration saved to flash (verified). ");
   } else {
     Serial.println("WARNING: calibration flash write did not verify.");
   }
 }
 
-// ===================== Shared sampling =====================================
-// Take one fresh measurement into values[] + rawValues[] (raw data unmodified by 3-stage pipeline).
-// For calibration, we use raw values directly. For display, we apply the full pipeline.
 void sampleChannelsOnce() {
   if (withLed) sensor.takeMeasurementsWithBulb();
   else sensor.takeMeasurements();
 
-  // Use raw getters (uint16_t)
   uint16_t (AS7265X::*rawGetters[])() = {
     &AS7265X::getA, &AS7265X::getB, &AS7265X::getC,
     &AS7265X::getD, &AS7265X::getE, &AS7265X::getF,
@@ -727,33 +620,31 @@ void sampleChannelsOnce() {
     &AS7265X::getR, &AS7265X::getS, &AS7265X::getT,
     &AS7265X::getU, &AS7265X::getV, &AS7265X::getW
   };
-  for (int n = 0; n < 18; n++) {
+
+  for (int n = 0; n < 18; ++n) {
     uint16_t raw = (sensor.*rawGetters[n])();
-    rawValues[rmap[n]] = (float)raw;  // store raw for calibration
-    float v = applyCalibratedPipeline(n, raw);  // apply full pipeline for display
-    showValue(n, v);
+    rawValues[n] = (float)raw;
+    float v = applyMeasurementPipeline(n, raw);
+    values[rmap[n]] = v;
   }
 }
 
-// Average CAL_SAMPLES fresh reads and return the chosen red/NIR channel ratio.
-// Uses RAW values (no pipeline) to match Tonino's expected target ratios.
 float samplePlateRatio() {
-  float rSum = 0, nirSum = 0;
-  for (int s = 0; s < CAL_SAMPLES; s++) {
+  float rSum = 0.0f;
+  float nirSum = 0.0f;
+
+  for (int s = 0; s < CAL_SAMPLES; ++s) {
     sampleChannelsOnce();
-    rSum += rawValues[colourCal.chRed];     // use raw values for calibration
+    rSum += rawValues[colourCal.chRed];
     nirSum += rawValues[colourCal.chNIR];
     delay(150);
   }
+
   float rAvg = rSum / CAL_SAMPLES;
   float nirAvg = nirSum / CAL_SAMPLES;
   return (nirAvg > 0.0f) ? (rAvg / nirAvg) : 0.0f;
 }
 
-// ===================== Two-plate calibration flow ==========================
-float ratioLow = 0.0f; // captured from the brown plate before fitting
-
-// Screen prompting for the LOW (brown) plate.
 void displayCalLowScreen() {
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
@@ -762,7 +653,6 @@ void displayCalLowScreen() {
   lcd.drawString("Press C to sample", 10, 80);
 }
 
-// Screen prompting for the HIGH (red) plate.
 void displayCalHighScreen() {
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
@@ -771,19 +661,19 @@ void displayCalHighScreen() {
   lcd.drawString("Press C to sample", 10, 80);
 }
 
-// Sample the low plate, store ratio, advance to the high-plate state.
 void doCalLow() {
   if (!sensorReady) { currentState = STATE_MENU; displayMenu(); return; }
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
   lcd.drawString("Sampling LOW...", 10, 40);
-  ratioLow = samplePlateRatio();
-  Serial.print("Cal LOW ratio="); Serial.println(ratioLow, 5);
+  float ratioLowTmp = samplePlateRatio();
+  Serial.print("Cal LOW ratio="); Serial.println(ratioLowTmp, 5);
+  // This is the raw ratio fit; no dark/white stage is required for V1.
+  ratioLow = ratioLowTmp;
   currentState = STATE_CAL_HIGH;
   displayCalHighScreen();
 }
 
-// Sample the high plate, fit the line, guard, persist, return to menu.
 void doCalHigh() {
   if (!sensorReady) { currentState = STATE_MENU; displayMenu(); return; }
   lcd.fillScreen(TFT_BLACK);
@@ -792,7 +682,6 @@ void doCalHigh() {
   float ratioHigh = samplePlateRatio();
   Serial.print("Cal HIGH ratio="); Serial.println(ratioHigh, 5);
 
-  // Degenerate-line guard (design §3/§4).
   if (fabs(ratioHigh - ratioLow) < MIN_RATIO_SEPARATION) {
     lcd.fillScreen(TFT_BLACK);
     lcd.setTextColor(TFT_RED);
@@ -871,12 +760,12 @@ void loop() {
   }
   else if (currentState == STATE_CAL_LOW) {
     if (confirmPressed) {
-      doCalLow();   // samples brown plate, advances to STATE_CAL_HIGH
+      doCalLow();
     }
   }
   else if (currentState == STATE_CAL_HIGH) {
     if (confirmPressed) {
-      doCalHigh();  // samples red plate, fits + persists, returns to menu
+      doCalHigh();
     }
   }
   else if (currentState == STATE_ABOUT) {
