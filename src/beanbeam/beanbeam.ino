@@ -14,7 +14,7 @@
 
 // Set to 1 to run the raw-vs-calibrated diagnostic once at boot (design §7
 // item 1 / REVIEW_ISSUES item 1). Set to 0 once the getter question is settled.
-#define CAL_DIAG_ON_BOOT 1
+#define CAL_DIAG_ON_BOOT 0
 
 #define LGFX_AUTODETECT
 #include "SparkFun_AS7265X.h" // Click here to get the library: http://librarymanager/All#SparkFun_AS7265X
@@ -585,19 +585,20 @@ void performMeasurement() {
     disableBulbs();
   }
 
-  float (AS7265X::*getters[])() = {
-    &AS7265X::getCalibratedA, &AS7265X::getCalibratedB, &AS7265X::getCalibratedC,
-    &AS7265X::getCalibratedD, &AS7265X::getCalibratedE, &AS7265X::getCalibratedF,
-    &AS7265X::getCalibratedG, &AS7265X::getCalibratedH, &AS7265X::getCalibratedI,
-    &AS7265X::getCalibratedJ, &AS7265X::getCalibratedK, &AS7265X::getCalibratedL,
-    &AS7265X::getCalibratedR, &AS7265X::getCalibratedS, &AS7265X::getCalibratedT,
-    &AS7265X::getCalibratedU, &AS7265X::getCalibratedV, &AS7265X::getCalibratedW
+  // Use raw getters (uint16_t) — all calibration is in firmware
+  uint16_t (AS7265X::*rawGetters[])() = {
+    &AS7265X::getA, &AS7265X::getB, &AS7265X::getC,
+    &AS7265X::getD, &AS7265X::getE, &AS7265X::getF,
+    &AS7265X::getG, &AS7265X::getH, &AS7265X::getI,
+    &AS7265X::getJ, &AS7265X::getK, &AS7265X::getL,
+    &AS7265X::getR, &AS7265X::getS, &AS7265X::getT,
+    &AS7265X::getU, &AS7265X::getV, &AS7265X::getW
   };
 
   Serial.print("$L,");
   for (int n = 0; n < 18; n++) {
-    float v = (sensor.*getters[n])();
-    v *= calibrationFactors[n];
+    float v = (float)(sensor.*rawGetters[n])(); // convert uint16_t to float
+    v *= calibrationFactors[n]; // apply firmware calibration
     showValue(n, v);
     Serial.print(v);
     if (n < 17) Serial.print(",");
@@ -672,25 +673,25 @@ void saveCalibration() {
 }
 
 // ===================== Shared sampling =====================================
-// Take one fresh measurement into values[] via the existing getters + rmap.
-// NOTE (REVIEW_ISSUES item 1 / design §7): if getCalibratedX() proves to be
-// cumulative on hardware, switch the getters[] below to the raw getters
-// getA()..getW() (uint16_t) — this is the single source of truth for channel
-// reads. Use diagRawVsCalibrated() to decide.
+// Take one fresh measurement into values[] via the raw getters + rmap.
+// All calibration is applied in firmware via calibrationFactors[].
 void sampleChannelsOnce() {
   if (withLed) sensor.takeMeasurementsWithBulb();
   else sensor.takeMeasurements();
 
-  float (AS7265X::*getters[])() = {
-    &AS7265X::getCalibratedA, &AS7265X::getCalibratedB, &AS7265X::getCalibratedC,
-    &AS7265X::getCalibratedD, &AS7265X::getCalibratedE, &AS7265X::getCalibratedF,
-    &AS7265X::getCalibratedG, &AS7265X::getCalibratedH, &AS7265X::getCalibratedI,
-    &AS7265X::getCalibratedJ, &AS7265X::getCalibratedK, &AS7265X::getCalibratedL,
-    &AS7265X::getCalibratedR, &AS7265X::getCalibratedS, &AS7265X::getCalibratedT,
-    &AS7265X::getCalibratedU, &AS7265X::getCalibratedV, &AS7265X::getCalibratedW
+  // Use raw getters (uint16_t) — all calibration is in firmware
+  uint16_t (AS7265X::*rawGetters[])() = {
+    &AS7265X::getA, &AS7265X::getB, &AS7265X::getC,
+    &AS7265X::getD, &AS7265X::getE, &AS7265X::getF,
+    &AS7265X::getG, &AS7265X::getH, &AS7265X::getI,
+    &AS7265X::getJ, &AS7265X::getK, &AS7265X::getL,
+    &AS7265X::getR, &AS7265X::getS, &AS7265X::getT,
+    &AS7265X::getU, &AS7265X::getV, &AS7265X::getW
   };
   for (int n = 0; n < 18; n++) {
-    showValue(n, (sensor.*getters[n])()); // showValue applies rmap into values[]
+    float v = (float)(sensor.*rawGetters[n])(); // convert uint16_t to float, apply calibration
+    v *= calibrationFactors[n];
+    showValue(n, v);
   }
 }
 
@@ -709,17 +710,15 @@ float samplePlateRatio() {
 }
 
 // ===================== Diagnostic (design §7 item 1) =======================
-// Print getRaw vs getCalibrated for one channel across several reads so we can
-// see on hardware whether getCalibratedX() accumulates. Run from the serial /
-// bring-up; safe, read-only.
+// Print raw values for channel A across several reads.
+// Helps verify sensor behavior during bring-up.
 void diagRawVsCalibrated() {
   if (!sensorReady) { Serial.println("diag: no sensor"); return; }
-  Serial.println("diag: reads of channel H (~645nm) raw vs calibrated:");
+  Serial.println("diag: raw reads of channel A (~410nm):");
   for (int i = 0; i < 5; i++) {
     if (withLed) sensor.takeMeasurementsWithBulb();
     else sensor.takeMeasurements();
-    Serial.print("  raw="); Serial.print(sensor.getA()); // A = 410nm master ch
-    Serial.print(" cal="); Serial.println(sensor.getCalibratedA());
+    Serial.print("  raw="); Serial.println(sensor.getA());
     delay(200);
   }
 }
