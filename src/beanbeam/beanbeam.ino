@@ -40,6 +40,39 @@ int gain = 0;
 static const int gains[4] = { AS7265X_GAIN_1X, AS7265X_GAIN_37X, AS7265X_GAIN_16X, AS7265X_GAIN_64X };
 static const char *sgain[4] = { "1X  ", "3.7X", "16X ", "64X " };
 
+// ===================== Optical tuning (illumination + gain) ================
+// These two knobs set how much light we put on the sample (bulb current) and
+// how much the detector amplifies what it reads back (gain). Adjust them here;
+// they are applied at startup and whenever the bulbs are enabled.
+//
+// IMPORTANT: Light level and gain are part of the measurement setup. If you
+// change either one, you MUST re-run the two-plate colour calibration, because
+// the red/NIR ratio and the stored fit are only valid for a fixed optical
+// configuration.
+//
+// Prefer more LIGHT over more GAIN: raising bulb current improves the true
+// signal-to-noise ratio (more photons), while raising gain just amplifies the
+// signal and its noise together. Set gain only as high as needed to use the
+// ADC range without saturating (readings pinned near the 16-bit max).
+
+// --- Bulb current ---------------------------------------------------------
+// Hardware offers only four discrete levels (2-bit field): 12.5 / 25 / 50 /
+// 100 mA. There is no 80 mA step. Power-on default is 12.5 mA (the weakest).
+//
+// *** IR LED LIMIT: the on-board IR LED (SIR19-21C) is rated ~65 mA DC max. ***
+// *** Do NOT drive the IR bulb at 100 mA. Keep the IR bulb at 50 mA or lower. ***
+// The White and UV bulbs can go to 100 mA, but we keep all three at a single
+// shared level for a consistent, easy-to-reason-about illumination.
+static const uint8_t BULB_CURRENT_WHITE = AS7265X_LED_CURRENT_LIMIT_50MA; // 12.5 / 25 / 50 / 100
+static const uint8_t BULB_CURRENT_IR    = AS7265X_LED_CURRENT_LIMIT_50MA; // MAX 50 mA — IR LED rated ~65 mA
+static const uint8_t BULB_CURRENT_UV    = AS7265X_LED_CURRENT_LIMIT_50MA; // 12.5 / 25 / 50 / 100
+
+// --- Gain -----------------------------------------------------------------
+// Index into gains[]: 0 = 1X, 1 = 3.7X, 2 = 16X, 3 = 64X.
+// With bulbs raised to 50 mA, 16X is a reasonable starting point. If channels
+// saturate, drop to 1 (3.7X); if still weak, raise toward 3 (64X).
+static const int DEFAULT_GAIN_INDEX = 1; // 16X
+
 void setGain(int i)
 {
   gain = i & 0x03;
@@ -123,7 +156,7 @@ void setup()
 
   if (sensorReady)
   {
-    setGain(2);
+    setGain(DEFAULT_GAIN_INDEX);
     sensor.setIndicatorCurrent(AS7265X_INDICATOR_CURRENT_LIMIT_1MA);
     Wire.setClock(400000);
 
@@ -190,6 +223,19 @@ int rmap[18];
 static const int   CAL_SAMPLES  = 3;
 static const float LOW_TARGET   = 1.5f;
 static const float HIGH_TARGET  = 3.7f;
+
+// ===================== Single-shot measurement timing =====================
+// A measurement is triggered by pressing C in the measure screen. It runs:
+//   1. a warm-up pause with the bulbs ON so the LEDs/sensor stabilise,
+//   2. MEASURE_SAMPLES readings that are averaged per channel,
+//   3. the averaged result is shown and HELD, and the bulbs are turned OFF.
+// Press C again to take a new reading; press B to return to the menu.
+static const uint32_t MEASURE_WARMUP_MS = 3000; // warm-up pause before sampling (ms)
+static const int      MEASURE_SAMPLES   = 3;    // readings averaged per measurement
+// Rough wall-clock cost of one sample (sensor read + the 150 ms settle delay).
+// Used only to estimate the on-screen countdown total; biased a little high so
+// the countdown never finishes before the real reading is ready.
+static const uint32_t MEASURE_SAMPLE_MS = 450;  // estimated time per sample (ms)
 static const float DEFAULT_CAL_0 = 1.011949f;
 static const float DEFAULT_CAL_1 = -0.094599f;
 static const float SCALE_0 = 0.0f;
@@ -274,7 +320,6 @@ static void initMap()
 
 float values[18];
 float rawValues[18];
-bool measurementPending = false;
 
 static const int CHART_BASELINE_Y = 222;
 static const int CHART_TOP_Y      = 128;
@@ -300,8 +345,14 @@ static const int numBands = sizeof(bands) / sizeof(bands[0]);
 
 void enableBulbs()
 {
+  // Set each bulb's drive current, then turn it on. Current is configured by
+  // the BULB_CURRENT_* constants above. NOTE: never raise BULB_CURRENT_IR to
+  // 100 mA — the on-board IR LED is rated ~65 mA DC max (keep it <= 50 mA).
+  sensor.setBulbCurrent(BULB_CURRENT_WHITE, AS7265x_LED_WHITE);
   sensor.enableBulb(AS7265x_LED_WHITE);
+  sensor.setBulbCurrent(BULB_CURRENT_IR, AS7265x_LED_IR);
   sensor.enableBulb(AS7265x_LED_IR);
+  sensor.setBulbCurrent(BULB_CURRENT_UV, AS7265x_LED_UV);
   sensor.enableBulb(AS7265x_LED_UV);
 }
 
@@ -351,6 +402,44 @@ void showScore(float ratio)
   lcd.setTextSize(3);
   lcd.setTextColor(TFT_WHITE);
   lcd.drawString(s, CHART_LEFT_X, numY);
+}
+
+// Draws progress feedback in the same panel the roast label/number use, so a
+// running measurement visibly replaces the (stale) previous result. The final
+// showScore() call later overwrites this with the real reading.
+void showProgress(const char *label, const char *big)
+{
+  const int panelTop = 20;
+  const int labelY = panelTop + 12;
+  const int numY   = panelTop + 64;
+
+  lcd.fillRect(CHART_LEFT_X, labelY, 320 - CHART_LEFT_X, 20, TFT_BLACK);
+  lcd.fillRect(CHART_LEFT_X, numY,   320 - CHART_LEFT_X, 24, TFT_BLACK);
+
+  lcd.setTextSize(2);
+  lcd.setTextColor(lcd.color888(160, 160, 160));
+  lcd.drawString(label, CHART_LEFT_X, labelY);
+
+  lcd.setTextSize(3);
+  lcd.setTextColor(TFT_WHITE);
+  lcd.drawString(big, CHART_LEFT_X, numY);
+}
+
+// Redraws the measurement countdown, but only when the whole-seconds value
+// actually changes (to avoid flicker). `lastShownSecs` is updated in place so
+// the caller can keep calling this cheaply inside tight loops. The remaining
+// time is derived from millis() so one call covers warm-up and sampling alike.
+void drawCountdown(uint32_t startMs, uint32_t totalEstMs, int &lastShownSecs)
+{
+  uint32_t elapsed   = millis() - startMs;
+  uint32_t remaining = (elapsed < totalEstMs) ? (totalEstMs - elapsed) : 0;
+  int secsLeft = (int)((remaining + 999) / 1000); // round up to whole seconds
+  if (secsLeft == lastShownSecs) return;
+  lastShownSecs = secsLeft;
+
+  char big[8];
+  sprintf(big, "%ds", secsLeft);
+  showProgress("READING", big);
 }
 
 void showValues(){
@@ -416,6 +505,9 @@ void drawChartLabels()
 
 void drawMeasureScreen()
 {
+  // The first reading auto-starts right after this (see the menu handler), so
+  // performMeasurement() takes over the top-right area with "MEASURING" and the
+  // countdown immediately. No entry prompt is drawn here to avoid a brief flash.
   lcd.fillScreen(TFT_BLACK);
   showResults();
   showScore(0.0f);
@@ -458,6 +550,11 @@ void displayAboutScreen() {
   lcd.drawString("Beanbeam V0.1 alpha", 20, 80);
 }
 
+// Single-shot measurement triggered by pressing C in the measure screen.
+// Blocking by design: warm-up pause -> average MEASURE_SAMPLES readings ->
+// hold the result on screen with the bulbs OFF. The buttons are not polled
+// during the ~MEASURE_WARMUP_MS warm-up; that is an accepted trade-off for a
+// short, deliberate single reading (see MEASURE_WARMUP_MS).
 void performMeasurement() {
   if (currentState != STATE_MEASURE) return;
 
@@ -469,41 +566,57 @@ void performMeasurement() {
     return;
   }
 
-  if (!measurementPending) {
-    lcd.setTextSize(1);
-    lcd.setTextColor(TFT_RED);
-    lcd.drawString("LIVE", 260, 0);
-    lcd.setTextColor(TFT_WHITE);
+  // --- Warm-up: bulbs on, let the LEDs and sensor stabilise ---------------
+  led = !led;
+  digitalWrite(LED_BUILTIN, led);
+  if (withLed) enableBulbs();
 
-    led = !led;
-    digitalWrite(LED_BUILTIN, led);
+  lcd.setTextSize(1);
+  lcd.setTextColor(TFT_RED);
+  lcd.fillRect(220, 0, 100, 10, TFT_BLACK);
+  lcd.drawString("MEASURING", 220, 0);
+  lcd.setTextColor(TFT_WHITE);
 
-    if (withLed) enableBulbs();
+  // One unified countdown across warm-up AND sampling, so it ticks smoothly in
+  // whole seconds to zero and the result lands right as it finishes. The total
+  // is an estimate (warm-up + per-sample allowance) biased slightly high, so
+  // the real reading is always ready at or before the counter hits zero.
+  const uint32_t totalEstMs = MEASURE_WARMUP_MS + (uint32_t)MEASURE_SAMPLES * MEASURE_SAMPLE_MS;
+  const uint32_t startMs = millis();
+  int lastShownSecs = -1;
 
-    sensor.setMeasurementMode(AS7265X_MEASUREMENT_MODE_6CHAN_ONE_SHOT);
-    measurementPending = true;
-    return;
+  // Warm-up wait, redrawing the countdown ~20x/sec (it only repaints on a
+  // whole-second change, so this is cheap).
+  {
+    uint32_t warmEnd = startMs + MEASURE_WARMUP_MS;
+    while ((int32_t)(millis() - warmEnd) < 0) {
+      drawCountdown(startMs, totalEstMs, lastShownSecs);
+      delay(50);
+    }
   }
 
-  if (!sensor.dataAvailable()) return;
+  // --- Sampling: average MEASURE_SAMPLES readings per channel -------------
+  float sums[18] = { 0.0f };
+  for (int s = 0; s < MEASURE_SAMPLES; ++s) {
+    drawCountdown(startMs, totalEstMs, lastShownSecs);
+    sampleChannelsOnce();            // fills rawValues[] with the bulbs on
+    for (int n = 0; n < 18; ++n) sums[n] += rawValues[n];
+    delay(150);
+  }
 
+  // Bulbs off now that sampling is done; the result stays frozen on screen.
   if (withLed) disableBulbs();
+  led = 0;
+  digitalWrite(LED_BUILTIN, led);
 
-  uint16_t (AS7265X::*rawGetters[])() = {
-    &AS7265X::getA, &AS7265X::getB, &AS7265X::getC,
-    &AS7265X::getD, &AS7265X::getE, &AS7265X::getF,
-    &AS7265X::getG, &AS7265X::getH, &AS7265X::getI,
-    &AS7265X::getJ, &AS7265X::getK, &AS7265X::getL,
-    &AS7265X::getR, &AS7265X::getS, &AS7265X::getT,
-    &AS7265X::getU, &AS7265X::getV, &AS7265X::getW
-  };
-
+  // Store the averaged channels into both the raw-ordered and display-ordered
+  // arrays so the chart and the ratio use the same averaged data.
   Serial.print("$L,");
-  for (int n = 0; n < 18; n++) {
-    uint16_t raw = (sensor.*rawGetters[n])();
-    rawValues[n] = (float)raw;
-    showValue(n, (float)raw);
-    Serial.print(raw);
+  for (int n = 0; n < 18; ++n) {
+    float avg = sums[n] / MEASURE_SAMPLES;
+    rawValues[n] = avg;
+    showValue(n, avg);             // values[rmap[n]] = avg
+    Serial.print((uint16_t)(avg + 0.5f));
     if (n < 17) Serial.print(",");
   }
 
@@ -536,7 +649,12 @@ void performMeasurement() {
     lcd.drawString(s, 250, 0);
   }
 
-  measurementPending = false;
+  // Replace the "MEASURING" banner with a prompt to take another reading.
+  lcd.setTextSize(1);
+  lcd.setTextColor(lcd.color888(160, 160, 160));
+  lcd.fillRect(220, 0, 100, 10, TFT_BLACK);
+  lcd.drawString("C=again B=menu", 200, 0);
+  lcd.setTextColor(TFT_WHITE);
 }
 
 void loadCalibration() {
@@ -566,6 +684,15 @@ void saveCalibration() {
   }
 }
 
+// Turn the bulbs on and wait MEASURE_WARMUP_MS so the LEDs/sensor stabilise.
+// Shared by live measurement and two-plate calibration so both sample the
+// plate/sample under identical illumination conditions. Caller is responsible
+// for turning the bulbs off afterwards.
+void warmUpBulbs() {
+  if (withLed) enableBulbs();
+  delay(MEASURE_WARMUP_MS);
+}
+
 void sampleChannelsOnce() {
   if (withLed) sensor.takeMeasurementsWithBulb();
   else sensor.takeMeasurements();
@@ -586,6 +713,13 @@ void sampleChannelsOnce() {
 }
 
 float samplePlateRatio() {
+  // Warm up exactly like a live measurement, so the calibration plates are
+  // sampled under the same illumination the real readings use.
+  lcd.setTextSize(2);
+  lcd.setTextColor(TFT_WHITE);
+  lcd.drawString("Warming up...", 10, 110);
+  warmUpBulbs();
+
   float rSum = 0.0f;
   float nirSum = 0.0f;
 
@@ -595,6 +729,8 @@ float samplePlateRatio() {
     nirSum += rawValues[colourCal.chNIR];
     delay(150);
   }
+
+  if (withLed) disableBulbs();
 
   float rAvg = rSum / CAL_SAMPLES;
   float nirAvg = nirSum / CAL_SAMPLES;
@@ -690,8 +826,8 @@ void loop() {
       switch (menuSelection) {
         case 0:
           currentState = STATE_MEASURE;
-          measurementPending = false;
           drawMeasureScreen();
+          performMeasurement();   // start the first reading right away
           break;
         case 1:
           currentState = STATE_CAL_LOW;
@@ -706,11 +842,12 @@ void loop() {
     }
   }
   else if (currentState == STATE_MEASURE) {
-    if (confirmPressed) {
+    // B returns to the menu; C (or the 5-way press) takes a new single-shot
+    // reading. Nothing happens otherwise — the last result stays on screen.
+    if (keyBPressed) {
       currentState = STATE_MENU;
-      measurementPending = false;
       displayMenu();
-    } else {
+    } else if (confirmPressed) {
       performMeasurement();
     }
   }
