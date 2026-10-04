@@ -46,9 +46,6 @@ src/beanbeam/
 ├── beanbeam.ino     # Main sketch: setup()/loop(), menus, calibration, display
 ├── button.h         # Header: Button class (poll-based debounced button)
 └── button.cpp       # Implementation: debouncing, edge/level detection
-clean_func.txt       # Scratch reference copy of an earlier performMeasurement() (do not compile directly)
-measurement_func.txt # Scratch reference copy (identical intent); not part of the build
-REVIEW_ISSUES.md     # Code review: applied refactors + severity-ranked backlog + verification gate
 LICENSE.md           # MIT license for this project
 ```
 
@@ -92,9 +89,11 @@ On the TFT main menu navigate with **A** (up) / **B** (down):
 | **C** | Enter selected action; also returns to the main menu from any state. |
 | 5-way **S5** keys | See [Button layout](#button-layout). |
 
-- **Measure** → continuously samples the 18 wavelengths and draws live bars.
-- **Calibrate** → enter the calibration state, place a white reference, then
-  press **C** to run the multi-sample white-reference calibration.
+- **Measure** → samples the 18 wavelengths, draws the spectral bars, and shows
+  the roast-color number/label from the 860nm reading.
+- **Calibrate** → two-point roast-color calibration: place the **DARK**
+  reference and press **C**, then the **LIGHT** reference and press **C**. The
+  firmware fits a line through the two 860nm readings.
 - **About** → shows build/version info.
 - Press **C** at any time to return to the menu.
 
@@ -116,23 +115,33 @@ positions; the central "PRESS" button is the primary select/confirm.
 | 5-way right | `WIO_5S_RIGHT` | `S5R` |
 
 > **Note:** as of V0.1 the five `S5*` buttons are **instantiated but not yet
-> wired into the state machine** — only the A/B/C buttons drive navigation. If
-> you are reassigning the S5 keys (e.g. to zoom or add channels), see
-> [`REVIEW_ISSUES.md`](REVIEW_ISSUES.md).
+> wired into the state machine** — only the A/B/C buttons drive navigation
+> (the 5-way centre press also acts as confirm).
 
 ---
 
 ## Calibration
 
-`performCalibration()` / `runCalibrationSequence()` take several samples while a
-white reference is in place (`takeMeasurementsWithBulb()`) and store the inverse
-of the average per channel into `calibrationFactors[18]`.
+Roast color is a single-channel **860nm** (near-IR) measurement mapped to a
+roast-color number by a two-point linear fit:
 
-> **Verify on hardware.** The current averaging reads the sensor's cumulative
-> calibrated totals, which may not be a valid white-reference measurement — the
-> exact getter (`getRawX`/`getDeltaX`/`getCalibratedX`) to average over must be
-> confirmed against the AS7265X library on the target. See
-> [`REVIEW_ISSUES.md` → Item 1](REVIEW_ISSUES.md).
+```
+score = slope * raw860 + intercept
+```
+
+Calibration samples two roasted references — a **DARK** one and a **LIGHT** one
+— each averaged over `CAL_SAMPLES` readings under the measurement illumination.
+You assign the two scores in the firmware (edit `DARK_SCORE` / `LIGHT_SCORE`
+near the top of the calibration section), and the fit is stored in flash so it
+survives a power cycle. Darker roasts reflect less 860nm light and score lower,
+so the LIGHT reference must read a clearly higher 860nm count than the DARK one
+or the fit is rejected.
+
+> **Optical setup matters.** The fit is only valid for a fixed gain, bulb
+> current, and sample distance. If you change any of those, re-run calibration.
+> There is no white/dark normalization yet, so the two-point fit is only
+> partially self-normalizing against bulb aging — re-calibrate if readings
+> drift.
 
 ---
 
@@ -148,7 +157,7 @@ Dual-attribution.
 
 ## Contributing
 
-This is an alpha; contributions are welcome as PRs. See
-[`REVIEW_ISSUES.md`](REVIEW_ISSUES.md) for the current backlog and open
-questions (dead `withLed` branch, persistence of calibration factors, hardware
-flow for `S5`).
+This is an alpha; contributions are welcome as PRs. Known open areas: wiring the
+`S5` 5-way keys into the state machine, a dark/white reference normalization
+pass for the 860nm reading, and raising gain so the 860nm signal uses more of
+the ADC range.

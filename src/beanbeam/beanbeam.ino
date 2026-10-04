@@ -46,8 +46,8 @@ static const char *sgain[4] = { "1X  ", "3.7X", "16X ", "64X " };
 // they are applied at startup and whenever the bulbs are enabled.
 //
 // IMPORTANT: Light level and gain are part of the measurement setup. If you
-// change either one, you MUST re-run the two-plate colour calibration, because
-// the red/NIR ratio and the stored fit are only valid for a fixed optical
+// change either one, you MUST re-run the roast-color calibration, because the
+// raw 860nm reading and the stored fit are only valid for a fixed optical
 // configuration.
 //
 // Prefer more LIGHT over more GAIN: raising bulb current improves the true
@@ -224,9 +224,9 @@ int rmap[18];
 //     score = slope * raw860 + intercept
 //
 // Darker roasts reflect LESS 860nm light (lower raw count) and score lower.
-// No white/dark normalization yet (see design_calibration.md) — the two-point
-// fit is partially self-normalizing as long as gain and bulb current are not
-// changed between calibrating and measuring.
+// No white/dark normalization yet — the two-point fit is partially
+// self-normalizing as long as gain and bulb current are not changed between
+// calibrating and measuring.
 //
 // *** EDIT THESE to set the scores you assign to your two reference roasts. ***
 // Behaves roughly like an Agtron scale (low = dark, high = light).
@@ -278,10 +278,11 @@ static const uint16_t CAL_VERSION = 3;  // bumped: slope/intercept layout
 struct PersistedCalibration {
   uint32_t magic;
   uint16_t version;
-  uint16_t reserved0[18];  // darkOffsets — kept for future use but not applied in V1
-  uint16_t reserved1[18];  // whiteReference — kept for future use but not applied in V1
-  float    reserved2[18];  // calibrationFactors — kept for future use but not applied in V1
-  ColourCalibration colourCal;
+  ColourCalibration colourCal;   // the roast-color line (slope/intercept + channel)
+  // Reserved space for a future dark/white reference normalization pass.
+  // Not read or written in V1; bump CAL_VERSION when it starts being used so
+  // older blobs are safely ignored.
+  float    reserved[18];
 };
 
 FlashStorage(calStore, PersistedCalibration);
@@ -625,7 +626,7 @@ void performMeasurement() {
   digitalWrite(LED_BUILTIN, led);
 
   // Store the averaged channels into both the raw-ordered and display-ordered
-  // arrays so the chart and the ratio use the same averaged data.
+  // arrays so the chart and the roast-color reading use the same averaged data.
   Serial.print("$L,");
   for (int n = 0; n < 18; ++n) {
     float avg = sums[n] / MEASURE_SAMPLES;
@@ -701,9 +702,9 @@ void saveCalibration() {
 }
 
 // Turn the bulbs on and wait MEASURE_WARMUP_MS so the LEDs/sensor stabilise.
-// Shared by live measurement and two-plate calibration so both sample the
-// plate/sample under identical illumination conditions. Caller is responsible
-// for turning the bulbs off afterwards.
+// Shared by live measurement and roast-color calibration so both sample the
+// reference/sample under identical illumination conditions. Caller is
+// responsible for turning the bulbs off afterwards.
 void warmUpBulbs() {
   if (withLed) enableBulbs();
   delay(MEASURE_WARMUP_MS);
@@ -731,7 +732,7 @@ void sampleChannelsOnce() {
 // Averages CAL_SAMPLES raw 860nm readings off the reference currently under
 // the sensor, warming up exactly like a live measurement so the reference is
 // sampled under the same illumination the real readings use.
-float samplePlateRaw860() {
+float sampleReferenceRaw860() {
   lcd.setTextSize(2);
   lcd.setTextColor(TFT_WHITE);
   lcd.drawString("Warming up...", 10, 110);
@@ -777,7 +778,7 @@ void doCalLow() {
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
   lcd.drawString("Sampling DARK...", 10, 40);
-  calibrationRaw860Low = samplePlateRaw860();
+  calibrationRaw860Low = sampleReferenceRaw860();
   Serial.print("Cal DARK raw860="); Serial.println(calibrationRaw860Low, 1);
   currentState = STATE_CAL_HIGH;
   displayCalHighScreen();
@@ -788,7 +789,7 @@ void doCalHigh() {
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
   lcd.drawString("Sampling LIGHT...", 10, 40);
-  float raw860High = samplePlateRaw860();
+  float raw860High = sampleReferenceRaw860();
   Serial.print("Cal LIGHT raw860="); Serial.println(raw860High, 1);
 
   // The LIGHT reference must read a higher raw 860nm count than the DARK one
