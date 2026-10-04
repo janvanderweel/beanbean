@@ -3,10 +3,12 @@
 A small embedded program that reads the **18-channel Spectrum Triad
 [AS7265X](https://www.spektral.com/product/spectrum-triad-4-2-as7265x-ultraviolet-visible-near-infrared-spectrophotometer/)** and renders per-wavelength light bars on a TFT screen.
 
-This is alpha code, might run at all!
+This is early **alpha (V0.1)** code — the focus is the logic (menus,
+calibration, display) rather than a production-grade instrument.
 
-Originally written for a **Seeed Studio WIO Terminal** (running the
-[Arduino](https://www.arduino.cc/) / [IDE](https://www.arduino.cc/en/software) sketch `src/beanbeam/beanbeam.ino`), with an optional later port to the Grove Pi. It is an early **alpha (V0.1)** — the logic (menus, calibration, display) is the focus, not a production-grade instrument.
+Written for a **Seeed Studio WIO Terminal**, running the
+[Arduino](https://www.arduino.cc/) / [IDE](https://www.arduino.cc/en/software)
+sketch `src/beanbeam/beanbeam.ino`.
 
 Made by **Jan van der Weel**. The hardware sensor and most libraries are from **SparkFun Electronics**.
 
@@ -18,10 +20,10 @@ Made by **Jan van der Weel**. The hardware sensor and most libraries are from **
 | :--- | :--- |
 | **18-channel spectral read** | 18 AS7265X channels (410 nm → 940 nm, incl. near-infrared) polled over I2C. |
 | **Live bars & values** | For each wavelength a bar graph is drawn on the TFT, scaled per measurement. |
-| **Per-channel calibration factors** | White-reference scaling factors (`calibrationFactors[18]`) can be computed and stored in RAM. |
-| **Gain selection** | Four fixed sensor gains (`1x / 3.7x / 16x / 64x`) from a menu. |
-| **Multi-touch navigation** | The **A / B / C** buttons and the 5-way **S5** buttons drive the menu and states. |
-| **Calibration flow** | Menu → *Calibrate* → place white reference → Button C triggers the multi-sample calibration. |
+| **Roast color** | The 860 nm (near-IR) reading is mapped to a roast-color number + label via a two-point fit. |
+| **Gain selection** | Four fixed sensor gains (`1x / 3.7x / 16x / 64x`) available in firmware. |
+| **Button navigation** | The **A / B / C** buttons drive the menu and states (5-way centre press also confirms). |
+| **Calibration flow** | Menu → *Calibrate* → sample a DARK reference, then a LIGHT reference; the firmware fits the line and stores it in flash. |
 | **About / info screens** | Device type, hardware/firmware versions printed on boot and shown on an About screen. |
 
 ---
@@ -33,9 +35,9 @@ Made by **Jan van der Weel**. The hardware sensor and most libraries are from **
 - **1.8"–2.4" SPI/parallel TFT display** — driven by Lovyan GFX/LGFX (via a breakout on the WIO).
 - **Button matrix** — the WIO's push buttons (A/B/C) and the **5-way S5** keypad.
 
-> **No build/SDK for the WIO Terminal is available on this host.** This repo holds
-> source only; verifying/simulating requires the Arduino toolchain plus the
-> SparkFun AS7265X library installed on the target machine.
+> Building requires the Arduino toolchain (Arduino IDE or `arduino-cli`) with the
+> Seeed WIO Terminal board support and the SparkFun AS7265X, FlashStorage_SAMD,
+> and LovyanGFX libraries installed. See [Build](#build) below.
 
 ---
 
@@ -55,14 +57,20 @@ LICENSE.md           # MIT license for this project
 
 ## Build
 
-1. Install the **Arduino IDE** (or PlatformIO) and add the **Seeed WIO Terminal**
-   board and the **SparkFun AS7265X** library (`Library Manager → Search:
-   SparkFun AS7265X`), plus any display library variants (Lovyan GFX).
-2. Create a new **WIO Terminal sketch** and paste `src/beanbeam/beanbeam.ino`.
-   `button.h` / `button.cpp` are compiled as regular source files in the same
-   sketch.
-3. Upload and open **Serial Monitor** at **115200 baud** (boot prints device
+1. Install the **Arduino IDE** (or `arduino-cli`) and add the **Seeed WIO
+   Terminal** board support (`Seeeduino:samd`).
+2. Install the required libraries via the Library Manager:
+   **SparkFun Spectral Triad AS7265x**, **FlashStorage_SAMD**, and **LovyanGFX**.
+3. Open `src/beanbeam/beanbeam.ino`. `button.h` / `button.cpp` compile as part
+   of the same sketch.
+4. Upload and open the **Serial Monitor** at **115200 baud** (boot prints device
    type, firmware, and the wavelength labels, then the menu).
+
+With `arduino-cli` the compile command is:
+
+```
+arduino-cli compile --fqbn Seeeduino:samd:seeed_wio_terminal src/beanbeam
+```
 
 ### Wiring notes to check first
 
