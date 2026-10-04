@@ -8,7 +8,7 @@ This is alpha code, might run at all!
 Originally written for a **Seeed Studio WIO Terminal** (running the
 [Arduino](https://www.arduino.cc/) / [IDE](https://www.arduino.cc/en/software) sketch `src/beanbeam/beanbeam.ino`), with an optional later port to the Grove Pi. It is an early **alpha (V0.1)** — the logic (menus, calibration, display) is the focus, not a production-grade instrument.
 
-Made by **Jan van der Weel**, derived from **[Reinhardt Behm's](https://github.com/SinKang)** Spectral Triad library code. The hardware sensor and most libraries are from **SparkFun Electronics**.
+Made by **Jan van der Weel**. The hardware sensor and most libraries are from **SparkFun Electronics**.
 
 ---
 
