@@ -25,8 +25,8 @@ static LGFX lcd;
 enum AppState {
   STATE_MENU,
   STATE_MEASURE,
-  STATE_CAL_LOW,   // two-plate calibration: waiting to sample the LOW (brown) plate
-  STATE_CAL_HIGH,  // two-plate calibration: waiting to sample the HIGH (red) plate
+  STATE_CAL_LOW,   // roast-color calibration: waiting to sample the DARK reference
+  STATE_CAL_HIGH,  // roast-color calibration: waiting to sample the LIGHT reference
   STATE_ABOUT
 };
 
@@ -216,13 +216,24 @@ static const char *freq[18] =
 
 int rmap[18];
 
-// ===================== Two-plate (Tonino-lite) colour calibration ==========
-// V1: Raw two-plate roast fit. Dark/white normalization deferred until
-// proper hardware reference standards (black enclosure, white tile) are available.
+// ===================== Roast-color calibration (raw 860nm, two-point) =======
+// V1: single-channel near-IR reflectance proxy. We read the raw 860nm count
+// off two roasted reference samples (a DARK one and a LIGHT one), give each a
+// score, and fit a straight line through them:
+//
+//     score = slope * raw860 + intercept
+//
+// Darker roasts reflect LESS 860nm light (lower raw count) and score lower.
+// No white/dark normalization yet (see design_calibration.md) — the two-point
+// fit is partially self-normalizing as long as gain and bulb current are not
+// changed between calibrating and measuring.
+//
+// *** EDIT THESE to set the scores you assign to your two reference roasts. ***
+// Behaves roughly like an Agtron scale (low = dark, high = light).
+static const float DARK_SCORE  = 80.0f;  // score for the DARK reference roast
+static const float LIGHT_SCORE = 106.0f;  // score for the LIGHT reference roast
 
 static const int   CAL_SAMPLES  = 3;
-static const float LOW_TARGET   = 1.5f;
-static const float HIGH_TARGET  = 3.7f;
 
 // ===================== Single-shot measurement timing =====================
 // A measurement is triggered by pressing C in the measure screen. It runs:
@@ -236,30 +247,33 @@ static const int      MEASURE_SAMPLES   = 3;    // readings averaged per measure
 // Used only to estimate the on-screen countdown total; biased a little high so
 // the countdown never finishes before the real reading is ready.
 static const uint32_t MEASURE_SAMPLE_MS = 450;  // estimated time per sample (ms)
-static const float DEFAULT_CAL_0 = 1.011949f;
-static const float DEFAULT_CAL_1 = -0.094599f;
-static const float SCALE_0 = 0.0f;
-static const float SCALE_1 = 0.0f;
-static const float SCALE_2 = 102.2727273f;
-static const float SCALE_3 = -128.4090909f;
-static const int   DEFAULT_CH_RED  = 9;  // ~645nm red
-static const int   DEFAULT_CH_NIR  = 15; // ~860nm NIR roast development
-static const float MIN_RATIO_SEPARATION = 0.05f;
+
+// Default fit before any user calibration: identity-ish line so an
+// uncalibrated unit still reads *something*. Overwritten on first calibration.
+static const float DEFAULT_SLOPE     = 0.0f;
+static const float DEFAULT_INTERCEPT = 0.0f;
+static const int   DEFAULT_CH_NIR    = 15; // ~860nm near-IR, roast development
+// Minimum separation between the two references for a usable fit. The 860nm
+// raw counts on this hardware are small (tens, not thousands), so the guard is
+// RELATIVE: the LIGHT reference must exceed the DARK one by at least this
+// fraction of the DARK reading, with a tiny absolute floor to reject pure
+// noise when both readings are near zero.
+static const float MIN_RAW_SEPARATION_FRAC = 0.10f; // 10% brighter than DARK
+static const float MIN_RAW_SEPARATION_ABS  = 3.0f;  // noise floor (counts)
 
 struct ColourCalibration {
-  float cal0;
-  float cal1;
-  int   chRed;
-  int   chNIR;
-  bool  valid;
+  float slope;      // score = slope * raw860 + intercept
+  float intercept;
+  int   chNIR;      // channel index used as the roast-development signal (860nm)
+  bool  valid;      // true once a good 2-point fit has been stored
 };
 
 ColourCalibration colourCal = {
-  DEFAULT_CAL_0, DEFAULT_CAL_1, DEFAULT_CH_RED, DEFAULT_CH_NIR, false
+  DEFAULT_SLOPE, DEFAULT_INTERCEPT, DEFAULT_CH_NIR, false
 };
 
 static const uint32_t CAL_MAGIC   = 0xB3A11CALu;
-static const uint16_t CAL_VERSION = 2;
+static const uint16_t CAL_VERSION = 3;  // bumped: slope/intercept layout
 
 struct PersistedCalibration {
   uint32_t magic;
@@ -272,20 +286,21 @@ struct PersistedCalibration {
 
 FlashStorage(calStore, PersistedCalibration);
 
-float roastNumberFromRatio(float ratio)
+float roastColorFromRaw(float raw860)
 {
-  float v = colourCal.cal0 * ratio + colourCal.cal1;
-  return SCALE_0 * v * v * v + SCALE_1 * v * v + SCALE_2 * v + SCALE_3;
+  return colourCal.slope * raw860 + colourCal.intercept;
 }
 
+// Roast-color buckets on the DARK_SCORE..LIGHT_SCORE scale (low = dark).
+// Thresholds are the upper bound of each bucket; tune to taste.
 struct RoastBucket { float maxNumber; const char *label; };
 static const RoastBucket roastBuckets[] = {
-  {  75.0f, "ULTRA DARK" },
-  {  95.0f, "DARK" },
-  { 110.0f, "MEDIUM-DARK" },
-  { 125.0f, "MEDIUM" },
-  { 140.0f, "MEDIUM-LIGHT" },
-  { 155.0f, "LIGHT" },
+  {  60.0f, "ULTRA DARK" },
+  {  75.0f, "DARK" },
+  {  85.0f, "MEDIUM-DARK" },
+  { 100.0f, "MEDIUM" },
+  { 115.0f, "MEDIUM-LIGHT" },
+  { 125.0f, "LIGHT" },
   { 1e9f,   "ULTRA LIGHT" }
 };
 static const int numRoastBuckets = sizeof(roastBuckets) / sizeof(roastBuckets[0]);
@@ -370,11 +385,11 @@ void showResults()
   lcd.setTextSize(1);
   lcd.setTextColor(lcd.color888(160, 160, 160));
   lcd.drawString("ROAST", CHART_LEFT_X, panelTop);
-  lcd.drawString("TONINO #", CHART_LEFT_X, panelTop + 52);
+  lcd.drawString("ROAST COLOR", CHART_LEFT_X, panelTop + 52);
   lcd.drawFastHLine(0, CHART_TOP_Y - 6, 320, lcd.color888(48, 48, 48));
 }
 
-void showScore(float ratio)
+void showScore(float raw860)
 {
   const int panelTop = 20;
   const int labelY = panelTop + 12;
@@ -392,7 +407,7 @@ void showScore(float ratio)
     return;
   }
 
-  float number = roastNumberFromRatio(ratio);
+  float number = roastColorFromRaw(raw860);
   lcd.setTextSize(2);
   lcd.setTextColor(TFT_WHITE);
   lcd.drawString(roastLabel(number), CHART_LEFT_X, labelY);
@@ -623,14 +638,15 @@ void performMeasurement() {
   showValues();
 
   {
-    float red = values[rmap[colourCal.chRed]];
-    float nir = values[rmap[colourCal.chNIR]];
-    float ratio = (nir > 0.0f) ? (red / nir) : 0.0f;
-    showScore(ratio);
+    // chNIR is a display-order index into values[] (ascending wavelength),
+    // 860nm = index 15. values[] is already display-ordered here, so read it
+    // directly — do NOT apply rmap (that would land on 760nm).
+    float raw860 = values[colourCal.chNIR];
+    showScore(raw860);
     Serial.print("$R,");
-    Serial.print(ratio, 5);
+    Serial.print(raw860, 1);
     Serial.print(",");
-    Serial.println(colourCal.valid ? roastNumberFromRatio(ratio) : 0.0f, 1);
+    Serial.println(colourCal.valid ? roastColorFromRaw(raw860) : 0.0f, 1);
   }
 
   Serial.println();
@@ -662,7 +678,7 @@ void loadCalibration() {
   calStore.read(p);
   if (p.magic == CAL_MAGIC && p.version == CAL_VERSION) {
     colourCal = p.colourCal;
-    Serial.println("Calibration loaded from flash (two-plate raw V1).");
+    Serial.println("Calibration loaded from flash (roast-color raw 860nm V1).");
   } else {
     Serial.println("No valid calibration in flash; using defaults.");
   }
@@ -712,36 +728,37 @@ void sampleChannelsOnce() {
   }
 }
 
-float samplePlateRatio() {
-  // Warm up exactly like a live measurement, so the calibration plates are
-  // sampled under the same illumination the real readings use.
+// Averages CAL_SAMPLES raw 860nm readings off the reference currently under
+// the sensor, warming up exactly like a live measurement so the reference is
+// sampled under the same illumination the real readings use.
+float samplePlateRaw860() {
   lcd.setTextSize(2);
   lcd.setTextColor(TFT_WHITE);
   lcd.drawString("Warming up...", 10, 110);
   warmUpBulbs();
 
-  float rSum = 0.0f;
+  // Read 860nm identically to the measurement path: sampleChannelsOnce() fills
+  // rawValues[] in sensor order, then showValue() copies each channel into the
+  // display-ordered values[] (values[rmap[n]] = rawValues[n]). 860nm is
+  // display index chNIR (15), so read values[chNIR] directly after mapping.
   float nirSum = 0.0f;
-
   for (int s = 0; s < CAL_SAMPLES; ++s) {
     sampleChannelsOnce();
-    rSum += rawValues[colourCal.chRed];
-    nirSum += rawValues[colourCal.chNIR];
+    for (int n = 0; n < 18; ++n) showValue(n, rawValues[n]);
+    nirSum += values[colourCal.chNIR];
     delay(150);
   }
 
   if (withLed) disableBulbs();
 
-  float rAvg = rSum / CAL_SAMPLES;
-  float nirAvg = nirSum / CAL_SAMPLES;
-  return (nirAvg > 0.0f) ? (rAvg / nirAvg) : 0.0f;
+  return nirSum / CAL_SAMPLES;
 }
 
 void displayCalLowScreen() {
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
   lcd.setTextColor(TFT_WHITE);
-  lcd.drawString("Place LOW (brown)", 10, 40);
+  lcd.drawString("Place DARK ref", 10, 40);
   lcd.drawString("Press C to sample", 10, 80);
 }
 
@@ -749,19 +766,19 @@ void displayCalHighScreen() {
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
   lcd.setTextColor(TFT_WHITE);
-  lcd.drawString("Place HIGH (red)", 10, 40);
+  lcd.drawString("Place LIGHT ref", 10, 40);
   lcd.drawString("Press C to sample", 10, 80);
 }
 
-float calibrationRatioLow = 0.0f;
+float calibrationRaw860Low = 0.0f;  // raw 860nm of the DARK reference
 
 void doCalLow() {
   if (!sensorReady) { currentState = STATE_MENU; displayMenu(); return; }
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
-  lcd.drawString("Sampling LOW...", 10, 40);
-  calibrationRatioLow = samplePlateRatio();
-  Serial.print("Cal LOW ratio="); Serial.println(calibrationRatioLow, 5);
+  lcd.drawString("Sampling DARK...", 10, 40);
+  calibrationRaw860Low = samplePlateRaw860();
+  Serial.print("Cal DARK raw860="); Serial.println(calibrationRaw860Low, 1);
   currentState = STATE_CAL_HIGH;
   displayCalHighScreen();
 }
@@ -770,27 +787,36 @@ void doCalHigh() {
   if (!sensorReady) { currentState = STATE_MENU; displayMenu(); return; }
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextSize(2);
-  lcd.drawString("Sampling HIGH...", 10, 40);
-  float ratioHigh = samplePlateRatio();
-  Serial.print("Cal HIGH ratio="); Serial.println(ratioHigh, 5);
+  lcd.drawString("Sampling LIGHT...", 10, 40);
+  float raw860High = samplePlateRaw860();
+  Serial.print("Cal LIGHT raw860="); Serial.println(raw860High, 1);
 
-  if (fabs(ratioHigh - calibrationRatioLow) < MIN_RATIO_SEPARATION) {
+  // The LIGHT reference must read a higher raw 860nm count than the DARK one
+  // (lighter roast = more near-IR reflectance), and the two must be clearly
+  // separated so the fitted line is not near-vertical. Separation is judged
+  // relative to the DARK reading (counts are small on this hardware), with a
+  // small absolute floor so near-zero noise still fails.
+  float minSep = calibrationRaw860Low * MIN_RAW_SEPARATION_FRAC;
+  if (minSep < MIN_RAW_SEPARATION_ABS) minSep = MIN_RAW_SEPARATION_ABS;
+  if (raw860High - calibrationRaw860Low < minSep) {
     lcd.fillScreen(TFT_BLACK);
     lcd.setTextColor(TFT_RED);
     lcd.drawString("Cal FAILED:", 10, 40);
-    lcd.drawString("plates too similar", 10, 70);
-    Serial.println("Calibration rejected: ratios too close.");
+    lcd.drawString("refs too similar", 10, 70);
+    Serial.println("Calibration rejected: raw860 readings too close (or LIGHT < DARK).");
     delay(2500);
     currentState = STATE_MENU;
     displayMenu();
     return;
   }
 
-  colourCal.cal0 = (HIGH_TARGET - LOW_TARGET) / (ratioHigh - calibrationRatioLow);
-  colourCal.cal1 = LOW_TARGET - colourCal.cal0 * calibrationRatioLow;
+  // Fit score = slope * raw860 + intercept through the two reference points:
+  //   (calibrationRaw860Low, DARK_SCORE) and (raw860High, LIGHT_SCORE)
+  colourCal.slope = (LIGHT_SCORE - DARK_SCORE) / (raw860High - calibrationRaw860Low);
+  colourCal.intercept = DARK_SCORE - colourCal.slope * calibrationRaw860Low;
   colourCal.valid = true;
-  Serial.print("cal0="); Serial.print(colourCal.cal0, 5);
-  Serial.print(" cal1="); Serial.println(colourCal.cal1, 5);
+  Serial.print("slope="); Serial.print(colourCal.slope, 6);
+  Serial.print(" intercept="); Serial.println(colourCal.intercept, 3);
 
   saveCalibration();
 
