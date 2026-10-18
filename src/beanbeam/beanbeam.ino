@@ -229,9 +229,10 @@ int rmap[18];
 // calibrating and measuring.
 //
 // *** EDIT THESE to set the scores you assign to your two reference roasts. ***
-// Behaves roughly like an Agtron scale (low = dark, high = light).
-static const float DARK_SCORE  = 80.0f;  // score for the DARK reference roast
-static const float LIGHT_SCORE = 106.0f;  // score for the LIGHT reference roast
+// Agtron scale (low = dark, high = light). These are the known Agtron values
+// of the two calibration disks: the DARK disk and the LIGHT disk.
+static const float DARK_SCORE  = 31.2f;  // Agtron value of the DARK calibration disk
+static const float LIGHT_SCORE = 91.0f;  // Agtron value of the LIGHT calibration disk
 
 static const int   CAL_SAMPLES  = 3;
 
@@ -273,7 +274,7 @@ ColourCalibration colourCal = {
 };
 
 static const uint32_t CAL_MAGIC   = 0xB3A11CALu;
-static const uint16_t CAL_VERSION = 3;  // bumped: slope/intercept layout
+static const uint16_t CAL_VERSION = 4;  // bumped: new Agtron calibration disk values (31.2 / 91.0)
 
 struct PersistedCalibration {
   uint32_t magic;
@@ -292,17 +293,26 @@ float roastColorFromRaw(float raw860)
   return colourCal.slope * raw860 + colourCal.intercept;
 }
 
-// Roast-color buckets on the DARK_SCORE..LIGHT_SCORE scale (low = dark).
-// Thresholds are the upper bound of each bucket; tune to taste.
+// Roast-color buckets on the Agtron scale (low = dark, high = light).
+// Thresholds are the upper bound of each bucket:
+//   0–30   Very Dark
+//   30–40  Dark
+//   40–50  Medium-Dark
+//   50–60  Medium
+//   60–70  Medium-Light
+//   70–80  Light
+//   80–90  Very Light
+//   90–150 Extra Light
 struct RoastBucket { float maxNumber; const char *label; };
 static const RoastBucket roastBuckets[] = {
-  {  60.0f, "ULTRA DARK" },
-  {  75.0f, "DARK" },
-  {  85.0f, "MEDIUM-DARK" },
-  { 100.0f, "MEDIUM" },
-  { 115.0f, "MEDIUM-LIGHT" },
-  { 125.0f, "LIGHT" },
-  { 1e9f,   "ULTRA LIGHT" }
+  {  30.0f, "VERY DARK" },
+  {  40.0f, "DARK" },
+  {  50.0f, "MEDIUM-DARK" },
+  {  60.0f, "MEDIUM" },
+  {  70.0f, "MEDIUM-LIGHT" },
+  {  80.0f, "LIGHT" },
+  {  90.0f, "VERY LIGHT" },
+  { 1e9f,   "EXTRA LIGHT" }
 };
 static const int numRoastBuckets = sizeof(roastBuckets) / sizeof(roastBuckets[0]);
 
