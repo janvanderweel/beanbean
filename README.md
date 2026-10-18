@@ -99,9 +99,10 @@ On the TFT main menu navigate with **A** (up) / **B** (down):
 
 - **Measure** → samples the 18 wavelengths, draws the spectral bars, and shows
   the roast-color number/label from the 860nm reading.
-- **Calibrate** → two-point roast-color calibration: place the **DARK**
-  reference and press **C**, then the **LIGHT** reference and press **C**. The
-  firmware fits a line through the two 860nm readings.
+- **Calibrate** → two-point roast-color calibration using two **DiFluid
+  calibration disks**: place the **DARK** disk (Agtron 31.2) and press **C**,
+  then the **LIGHT** disk (Agtron 91.0) and press **C**. The firmware fits a
+  line through the two 860nm readings.
 - **About** → shows build/version info.
 - Press **C** at any time to return to the menu.
 
@@ -130,26 +131,41 @@ positions; the central "PRESS" button is the primary select/confirm.
 
 ## Calibration
 
-Roast color is a single-channel **860nm** (near-IR) measurement mapped to a
-roast-color number by a two-point linear fit:
+Roast color is a single-channel **860nm** (near-IR) measurement mapped to an
+**Agtron**-style roast-color number by a two-point linear fit:
 
 ```
 score = slope * raw860 + intercept
 ```
 
-Calibration samples two roasted references — a **DARK** one and a **LIGHT** one
-— each averaged over `CAL_SAMPLES` readings under the measurement illumination.
-You assign the two scores in the firmware (edit `DARK_SCORE` / `LIGHT_SCORE`
-near the top of the calibration section), and the fit is stored in flash so it
-survives a power cycle. Darker roasts reflect less 860nm light and score lower,
-so the LIGHT reference must read a clearly higher 860nm count than the DARK one
-or the fit is rejected.
+Calibration samples two **DiFluid calibration disks** of known Agtron value — a
+**DARK** disk (**Agtron 31.2**) and a **LIGHT** disk (**Agtron 91.0**) — each
+averaged over `CAL_SAMPLES` readings under the measurement illumination. These
+two Agtron values are set in the firmware (`DARK_SCORE` / `LIGHT_SCORE` near the
+top of the calibration section) and the fitted line is stored in flash so it
+survives a power cycle. Darker samples reflect less 860nm light and score lower,
+so the LIGHT disk must read a clearly higher 860nm count than the DARK one or
+the fit is rejected.
+
+The roast-color number is then labelled on the Agtron scale:
+
+| Agtron | Description |
+| :--- | :--- |
+| 0–30 | Very Dark |
+| 30–40 | Dark |
+| 40–50 | Medium–Dark |
+| 50–60 | Medium |
+| 60–70 | Medium–Light |
+| 70–80 | Light |
+| 80–90 | Very Light |
+| 90–150 | Extra Light |
 
 > **Optical setup matters.** The fit is only valid for a fixed gain, bulb
 > current, and sample distance. If you change any of those, re-run calibration.
 > There is no white/dark normalization yet, so the two-point fit is only
 > partially self-normalizing against bulb aging — re-calibrate if readings
-> drift.
+> drift. The line is anchored at the two disk values (31.2 and 91.0); readings
+> well outside that span are extrapolated.
 
 ---
 
