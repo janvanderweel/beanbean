@@ -76,35 +76,40 @@ arduino-cli compile --fqbn Seeeduino:samd:seeed_wio_terminal src/beanbeam
 
 | Pin group | What it should be |
 | :--- | :--- |
-| AS7265X **SCL/SDA** | I2C SCL/SDA, address 0x**39** (default), 400 kHz. Run I2C scan on boot. |
+| AS7265X **SCL/SDA** | I2C SCL/SDA, address 0x**49** (default), 400 kHz. Run I2C scan on boot. |
 | TFT | Enabled for Lovyan `/ LGFX_AUTODETECT` on a display-capable SPI port. |
 | WIO **A / B / C** | On-board push buttons (already `INPUT_PULLUP` via `Button` polling). |
 | **S5** (5-way) | See [Button layout](#button-layout). |
 
 If the board boots but reports the sensor as "not connected," check the AS7265X
-pull-ups, address (commonly 0x39), and that VCC/GND are powered.
+pull-ups, address (commonly 0x49), and that VCC/GND are powered.
 
 ---
 
 ## How to use it
 
-On the TFT main menu navigate with **A** (up) / **B** (down):
+In the main **menu**, navigate with **A** (up) / **B** (down) and press **C**
+(or the 5-way centre) to confirm:
 
-| Button | Action |
+| Button | Action (menu) |
 | :--- | :--- |
-| **A** | Scroll menu / sub-menus up. |
-| **B** | Scroll menu / sub-menus down. |
-| **C** | Enter selected action; also returns to the main menu from any state. |
-| 5-way **S5** keys | See [Button layout](#button-layout). |
+| **A** | Move selection up. |
+| **B** | Move selection down. |
+| **C** / 5-way press | Enter the selected action. |
 
-- **Measure** → samples the 18 wavelengths, draws the spectral bars, and shows
-  the roast-color number/label from the 860nm reading.
+- **Measure** → turns the bulbs on, averages several reads of the 18
+  wavelengths, and shows the roast-color number/label from the 860nm reading.
+  The result is held on screen:
+  - **A** toggles the view between the clean **roast card** (default) and the
+    **spectrum chart** (the 18-channel diagnostic bars).
+  - **C** (or the 5-way press) takes another reading.
+  - **B** returns to the menu (also aborts a reading during its warm-up).
 - **Calibrate** → two-point roast-color calibration using two **DiFluid
   calibration disks**: place the **DARK** disk (Agtron 31.2) and press **C**,
   then the **LIGHT** disk (Agtron 91.0) and press **C**. The firmware fits a
   line through the two 860nm readings.
-- **About** → shows build/version info.
-- Press **C** at any time to return to the menu.
+- **About** → shows build/version info. Press **C** (or the 5-way press) to
+  return to the menu.
 
 ### Button layout
 
@@ -123,9 +128,9 @@ positions; the central "PRESS" button is the primary select/confirm.
 | 5-way left | `WIO_5S_LEFT` | `S5L` |
 | 5-way right | `WIO_5S_RIGHT` | `S5R` |
 
-> **Note:** as of V0.1 the five `S5*` buttons are **instantiated but not yet
-> wired into the state machine** — only the A/B/C buttons drive navigation
-> (the 5-way centre press also acts as confirm).
+> **Note:** as of V0.1 the five `S5*` directional keys are **instantiated but
+> not yet wired into the state machine** — only the A/B/C buttons drive the UI
+> (the 5-way **centre press** is read as an alias for C/confirm).
 
 ---
 
